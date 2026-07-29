@@ -2,6 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   interruptCodexTurnBestEffort,
+  interruptCodexTurnWithAck,
   retireCodexAppServerClientAfterTimedOutTurn,
   unsubscribeCodexThreadBestEffort,
 } from "./attempt-client-cleanup.js";
@@ -21,6 +22,28 @@ describe("Codex app-server attempt client cleanup", () => {
       { threadId: "thread-1", turnId: "turn-1" },
       { timeoutMs: 123 },
     );
+  });
+
+  it("reports whether Codex acknowledged the bounded turn interrupt", async () => {
+    const acknowledged = vi.fn(async () => ({}));
+    const rejected = vi.fn(async () => {
+      throw new Error("turn already unavailable");
+    });
+
+    await expect(
+      interruptCodexTurnWithAck({ request: acknowledged } as never, {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        timeoutMs: 123,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      interruptCodexTurnWithAck({ request: rejected } as never, {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        timeoutMs: 123,
+      }),
+    ).resolves.toBe(false);
   });
 
   it("swallows unsubscribe cleanup failures", async () => {

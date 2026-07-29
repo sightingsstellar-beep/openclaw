@@ -105,6 +105,18 @@ export async function interruptCodexTurnAndWaitBestEffort(
     timeoutMs?: number;
   },
 ): Promise<void> {
+  await interruptCodexTurnWithAck(client, params);
+}
+
+/** Sends a bounded turn interrupt and reports whether Codex acknowledged it. */
+export async function interruptCodexTurnWithAck(
+  client: CodexAppServerClient,
+  params: {
+    threadId: string;
+    turnId: string;
+    timeoutMs?: number;
+  },
+): Promise<boolean> {
   const requestOptions =
     params.timeoutMs && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
       ? { timeoutMs: params.timeoutMs }
@@ -116,8 +128,10 @@ export async function interruptCodexTurnAndWaitBestEffort(
     await (requestOptions
       ? client.request("turn/interrupt", requestParams, requestOptions)
       : client.request("turn/interrupt", requestParams));
+    return true;
   } catch (error) {
     embeddedAgentLog.debug("codex app-server turn interrupt failed during abort", { error });
+    return false;
   }
 }
 

@@ -183,16 +183,18 @@ describe("createCodexAttemptTurnWatchController", () => {
       getActiveCompletionBlockerItemCount: () => 0,
       getActiveFinalizationHookCount: () => 0,
       canReleaseAssistantCompletionIdle: () => true,
+      canReleaseNativeSubagentIdle: () => false,
       turnCompletionIdleTimeoutMs: 500,
       turnAssistantCompletionIdleTimeoutMs: 500,
       turnAttemptIdleTimeoutMs: 200,
       turnTerminalIdleTimeoutMs: 500,
       interruptTimeoutMs: 5_000,
-      onInterruptTurn: vi.fn(),
+      onInterruptTurn: vi.fn(async () => true),
       onTimeout,
       onMarkTimedOut: vi.fn(),
       onAbort,
       onCompleted: vi.fn(),
+      onNativeSubagentIdleRelease: vi.fn(),
       onResolveCompletion: vi.fn(),
       onRecordEvent: vi.fn(),
       onAttemptProgress: vi.fn(),
@@ -265,6 +267,218 @@ describe("runCodexAppServerAttempt turn watches", () => {
     await expect(run.then(projectAttemptResult)).resolves.toMatchObject({
       aborted: false,
       timedOut: false,
+    });
+  });
+
+  it("yields a quiescent parent after native inter-agent activity", async () => {
+    const request = vi.fn(async () => undefined);
+    const harness = createStartedThreadHarness(request);
+    const params = createTestParams();
+    params.timeoutMs = 200;
+    const run = runCodexAppServerAttempt(params, {
+      pluginConfig: { appServer: { turnCompletionIdleTimeoutMs: 5 } },
+      turnTerminalIdleTimeoutMs: 60_000,
+    });
+    await harness.waitForMethod("turn/start");
+    await harness.notify({
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "child-thread",
+          source: {
+            subAgent: {
+              thread_spawn: {
+                parent_thread_id: "thread-1",
+                agent_path: "/root/child",
+              },
+            },
+          },
+        },
+      },
+    });
+    await harness.notify({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "agent_message",
+          author: "/root/child",
+          recipient: "/root",
+          content: [],
+        },
+      },
+    });
+
+    const result = await run;
+
+    expect(projectAttemptResult(result)).toMatchObject({
+      aborted: false,
+      timedOut: false,
+      promptError: null,
+      yieldDetected: true,
+    });
+    expect(result.codexAppServerFailure).toBeUndefined();
+    expect(result.promptTimeoutOutcome).toBeUndefined();
+    expect(request).toHaveBeenCalledWith(
+      "turn/interrupt",
+      { threadId: "thread-1", turnId: "turn-1" },
+      { timeoutMs: 5_000 },
+    );
+
+    await harness.notify({
+      method: "turn/completed",
+      params: {
+        threadId: "child-thread",
+        turnId: "child-turn",
+        turn: { id: "child-turn", status: "interrupted", items: [] },
+      },
+    });
+  });
+
+  it("keeps the parent pending when turn completion races native interrupt acknowledgment", async () => {
+    let acknowledgeInterrupt: () => void = () => {};
+    const interruptAcknowledged = new Promise<void>((resolve) => {
+      acknowledgeInterrupt = resolve;
+    });
+    const request = vi.fn(async (method: string) => {
+      if (method === "turn/interrupt") {
+        await interruptAcknowledged;
+      }
+      return undefined;
+    });
+    const harness = createStartedThreadHarness(request);
+    const params = createTestParams();
+    params.timeoutMs = 200;
+    const run = runCodexAppServerAttempt(params, {
+      pluginConfig: { appServer: { turnCompletionIdleTimeoutMs: 5 } },
+      turnTerminalIdleTimeoutMs: 60_000,
+    });
+    let settled = false;
+    void run.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    await harness.waitForMethod("turn/start");
+    await harness.notify({
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "child-thread",
+          source: {
+            subAgent: {
+              thread_spawn: {
+                parent_thread_id: "thread-1",
+                agent_path: "/root/child",
+              },
+            },
+          },
+        },
+      },
+    });
+    await harness.notify({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "agent_message",
+          author: "/root/child",
+          recipient: "/root",
+          content: [],
+        },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith(
+        "turn/interrupt",
+        { threadId: "thread-1", turnId: "turn-1" },
+        { timeoutMs: 5_000 },
+      ),
+    );
+
+    await harness.notify(turnCompleted({ id: "turn-1", status: "interrupted", items: [] }));
+    expect(settled).toBe(false);
+
+    acknowledgeInterrupt();
+    await expect(run.then(projectAttemptResult)).resolves.toMatchObject({
+      aborted: false,
+      timedOut: false,
+      promptError: null,
+      yieldDetected: true,
+    });
+  });
+
+  it("preserves raced terminal completion when native interrupt acknowledgment fails", async () => {
+    let rejectInterrupt: (error: Error) => void = () => {};
+    const interruptAcknowledged = new Promise<void>((_resolve, reject) => {
+      rejectInterrupt = reject;
+    });
+    const request = vi.fn(async (method: string) => {
+      if (method === "turn/interrupt") {
+        await interruptAcknowledged;
+      }
+      return undefined;
+    });
+    const harness = createStartedThreadHarness(request);
+    const params = createTestParams();
+    params.timeoutMs = 200;
+    const run = runCodexAppServerAttempt(params, {
+      pluginConfig: { appServer: { turnCompletionIdleTimeoutMs: 5 } },
+      turnTerminalIdleTimeoutMs: 60_000,
+    });
+
+    await harness.waitForMethod("turn/start");
+    await harness.notify({
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "child-thread",
+          source: {
+            subAgent: {
+              thread_spawn: {
+                parent_thread_id: "thread-1",
+                agent_path: "/root/child",
+              },
+            },
+          },
+        },
+      },
+    });
+    await harness.notify({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          type: "agent_message",
+          author: "/root/child",
+          recipient: "/root",
+          content: [],
+        },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith(
+        "turn/interrupt",
+        { threadId: "thread-1", turnId: "turn-1" },
+        { timeoutMs: 5_000 },
+      ),
+    );
+
+    await harness.notify(turnCompleted({ id: "turn-1", status: "completed", items: [] }));
+    rejectInterrupt(new Error("turn already completed"));
+
+    await expect(run.then(projectAttemptResult)).resolves.toMatchObject({
+      aborted: false,
+      timedOut: false,
+      promptError: null,
+      yieldDetected: false,
     });
   });
 

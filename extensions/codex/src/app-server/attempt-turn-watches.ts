@@ -39,16 +39,22 @@ export function createCodexAttemptTurnWatchController(params: {
   getActiveCompletionBlockerItemCount: () => number;
   getActiveFinalizationHookCount: () => number;
   canReleaseAssistantCompletionIdle: () => boolean;
+  canReleaseNativeSubagentIdle: (timeout: CodexAttemptTurnWatchTimeout) => boolean;
   turnCompletionIdleTimeoutMs: number;
   turnAssistantCompletionIdleTimeoutMs: number;
   turnAttemptIdleTimeoutMs: number;
   turnTerminalIdleTimeoutMs: number;
   interruptTimeoutMs: number;
-  onInterruptTurn: (input: { threadId: string; turnId: string; timeoutMs: number }) => void;
+  onInterruptTurn: (input: {
+    threadId: string;
+    turnId: string;
+    timeoutMs: number;
+  }) => Promise<boolean>;
   onTimeout: (timeout: CodexAttemptTurnWatchTimeout) => void;
   onMarkTimedOut: () => void;
   onAbort: (reason: string) => void;
   onCompleted: () => void;
+  onNativeSubagentIdleRelease: () => void;
   onResolveCompletion: () => void;
   onRecordEvent: (name: string, fields: Record<string, unknown>) => void;
   onAttemptProgress: (reason: string, details?: Record<string, unknown>) => void;
@@ -66,6 +72,7 @@ export function createCodexAttemptTurnWatchController(params: {
   let attemptIdleWatchArmed = false;
   let terminalIdleTimer: Timer | undefined;
   let terminalIdleWatchArmed = false;
+  let nativeSubagentIdleReleasePending = false;
   let completionLastActivityAt = Date.now();
   let completionLastActivityReason = "startup";
   let completionLastActivityDetails: Record<string, unknown> | undefined;
@@ -124,6 +131,7 @@ export function createCodexAttemptTurnWatchController(params: {
       params.isCompleted() ||
       params.signal.aborted ||
       !completionIdleWatchArmed ||
+      nativeSubagentIdleReleasePending ||
       params.getActiveAppServerTurnRequests() > 0 ||
       params.getActiveCompletionBlockerItemCount() > 0
     ) {
@@ -132,7 +140,7 @@ export function createCodexAttemptTurnWatchController(params: {
     const elapsedMs = Math.max(0, Date.now() - completionLastActivityAt);
     const timeoutMs = completionIdleTimeoutOverrideMs ?? turnCompletionIdleTimeoutMs;
     const delayMs = Math.max(1, timeoutMs - elapsedMs);
-    completionIdleTimer = setTimeout(fireCompletionIdleTimeout, delayMs);
+    completionIdleTimer = setTimeout(() => void fireCompletionIdleTimeout(), delayMs);
     completionIdleTimer.unref?.();
   }
 
@@ -142,6 +150,7 @@ export function createCodexAttemptTurnWatchController(params: {
       params.isCompleted() ||
       params.signal.aborted ||
       !assistantCompletionIdleWatchArmed ||
+      nativeSubagentIdleReleasePending ||
       params.getActiveFinalizationHookCount() > 0
     ) {
       return;
@@ -154,7 +163,12 @@ export function createCodexAttemptTurnWatchController(params: {
 
   function scheduleAttemptIdleWatch() {
     clearAttemptIdleTimer();
-    if (params.isCompleted() || params.signal.aborted || !attemptIdleWatchArmed) {
+    if (
+      params.isCompleted() ||
+      params.signal.aborted ||
+      !attemptIdleWatchArmed ||
+      nativeSubagentIdleReleasePending
+    ) {
       return;
     }
     const elapsedMs = Math.max(0, Date.now() - attemptLastProgressAt);
@@ -170,6 +184,7 @@ export function createCodexAttemptTurnWatchController(params: {
       params.isCompleted() ||
       params.signal.aborted ||
       !terminalIdleWatchArmed ||
+      nativeSubagentIdleReleasePending ||
       params.getActiveAppServerTurnRequests() > 0
     ) {
       return;
@@ -192,6 +207,7 @@ export function createCodexAttemptTurnWatchController(params: {
       params.isTerminalTurnNotificationQueued() ||
       params.signal.aborted ||
       !completionIdleWatchArmed ||
+      nativeSubagentIdleReleasePending ||
       params.getActiveAppServerTurnRequests() > 0 ||
       params.getActiveCompletionBlockerItemCount() > 0
     ) {
@@ -220,7 +236,12 @@ export function createCodexAttemptTurnWatchController(params: {
   }
 
   function fireAssistantCompletionIdleRelease() {
-    if (params.isCompleted() || params.signal.aborted || !assistantCompletionIdleWatchArmed) {
+    if (
+      params.isCompleted() ||
+      params.signal.aborted ||
+      !assistantCompletionIdleWatchArmed ||
+      nativeSubagentIdleReleasePending
+    ) {
       return;
     }
     if (
@@ -264,7 +285,7 @@ export function createCodexAttemptTurnWatchController(params: {
       },
     );
     if (turnId) {
-      params.onInterruptTurn({
+      void params.onInterruptTurn({
         threadId: params.threadId,
         turnId,
         timeoutMs: interruptTimeoutMs,
@@ -275,7 +296,12 @@ export function createCodexAttemptTurnWatchController(params: {
   }
 
   function fireAttemptIdleTimeout() {
-    if (params.isCompleted() || params.signal.aborted || !attemptIdleWatchArmed) {
+    if (
+      params.isCompleted() ||
+      params.signal.aborted ||
+      !attemptIdleWatchArmed ||
+      nativeSubagentIdleReleasePending
+    ) {
       return;
     }
     const idleMs = Math.max(0, Date.now() - attemptLastProgressAt);
@@ -285,7 +311,7 @@ export function createCodexAttemptTurnWatchController(params: {
       return;
     }
     if (isCompletionIdleTimeoutDueBeforeAttempt(timeoutMs)) {
-      fireCompletionIdleTimeout();
+      void fireCompletionIdleTimeout();
       return;
     }
     const timeout = {
@@ -316,12 +342,13 @@ export function createCodexAttemptTurnWatchController(params: {
     params.onAbort("turn_progress_idle_timeout");
   }
 
-  function fireCompletionIdleTimeout() {
+  async function fireCompletionIdleTimeout() {
     if (
       params.isCompleted() ||
       params.isTerminalTurnNotificationQueued() ||
       params.signal.aborted ||
       !completionIdleWatchArmed ||
+      nativeSubagentIdleReleasePending ||
       params.getActiveAppServerTurnRequests() > 0 ||
       params.getActiveCompletionBlockerItemCount() > 0
     ) {
@@ -349,6 +376,76 @@ export function createCodexAttemptTurnWatchController(params: {
       lastActivityReason: completionLastActivityReason,
       details,
     };
+    if (params.canReleaseNativeSubagentIdle(timeout)) {
+      clearAllTimers();
+      nativeSubagentIdleReleasePending = true;
+      const turnId = params.getTurnId();
+      let interruptAcknowledged = false;
+      if (turnId) {
+        try {
+          interruptAcknowledged = await params.onInterruptTurn({
+            threadId: params.threadId,
+            turnId,
+            timeoutMs: interruptTimeoutMs,
+          });
+        } catch {
+          interruptAcknowledged = false;
+        }
+      }
+      if (params.signal.aborted) {
+        nativeSubagentIdleReleasePending = false;
+        return;
+      }
+      if (interruptAcknowledged) {
+        nativeSubagentIdleReleasePending = false;
+        params.onRecordEvent("turn.native_subagent_idle_release", {
+          threadId: params.threadId,
+          turnId,
+          idleMs,
+          timeoutMs,
+          lastActivityReason: timeout.lastActivityReason,
+          ...timeout.details,
+        });
+        embeddedAgentLog.warn("codex app-server turn yielded after native subagent idle", {
+          threadId: params.threadId,
+          turnId,
+          idleMs,
+          timeoutMs,
+          lastActivityReason: timeout.lastActivityReason,
+          ...timeout.details,
+        });
+        params.onNativeSubagentIdleRelease();
+        params.onCompleted();
+        params.onResolveCompletion();
+        return;
+      }
+      nativeSubagentIdleReleasePending = false;
+      if (params.isCompleted()) {
+        return;
+      }
+      if (params.isTerminalTurnNotificationQueued()) {
+        params.onCompleted();
+        params.onResolveCompletion();
+        return;
+      }
+      params.onRecordEvent("turn.native_subagent_idle_interrupt_failed", {
+        threadId: params.threadId,
+        turnId,
+        idleMs,
+        timeoutMs,
+        lastActivityReason: timeout.lastActivityReason,
+        ...timeout.details,
+      });
+      embeddedAgentLog.warn(
+        "codex app-server native subagent idle interrupt was not acknowledged",
+        {
+          threadId: params.threadId,
+          turnId,
+          idleMs,
+          timeoutMs,
+        },
+      );
+    }
     params.onTimeout(timeout);
     params.onMarkTimedOut();
     params.onRecordEvent("turn.completion_idle_timeout", {
@@ -382,6 +479,7 @@ export function createCodexAttemptTurnWatchController(params: {
       params.isTerminalTurnNotificationQueued() ||
       params.signal.aborted ||
       !terminalIdleWatchArmed ||
+      nativeSubagentIdleReleasePending ||
       params.getActiveAppServerTurnRequests() > 0
     ) {
       return;
@@ -423,6 +521,7 @@ export function createCodexAttemptTurnWatchController(params: {
     isCompletionIdleWatchArmed: () => completionIdleWatchArmed,
     isCompletionIdleWatchPinnedByTerminalError: () => completionIdleWatchPinnedByTerminalError,
     isAssistantCompletionIdleWatchArmed: () => assistantCompletionIdleWatchArmed,
+    isNativeSubagentIdleReleasePending: () => nativeSubagentIdleReleasePending,
     armAttemptIdleWatch: () => {
       attemptIdleWatchArmed = true;
       scheduleAttemptIdleWatch();
