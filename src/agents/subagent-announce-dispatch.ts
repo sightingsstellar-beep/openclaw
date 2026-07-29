@@ -118,6 +118,9 @@ export async function runSubagentAnnounceDispatch(params: {
   if (primaryDirect.delivered || primaryDirect.terminal) {
     return withPhases(primaryDirect);
   }
+  if (primaryDirect.reason === "completion_handoff_pending") {
+    return withPhases(primaryDirect);
+  }
 
   if (params.signal?.aborted) {
     return withPhases(primaryDirect);
