@@ -626,6 +626,7 @@ describe("detectSetupInference", () => {
         choiceId: "zeta-api-key",
         choiceLabel: "Zeta API key",
         choiceHint: "Direct key",
+        groupLabel: "Zeta",
         icon: "https://cdn.example.com/zeta.svg",
         website: "https://zeta.example.com/keys",
         optionKey: "zetaApiKey",
@@ -638,6 +639,7 @@ describe("detectSetupInference", () => {
         methodId: "api-key",
         choiceId: "alpha-api-key",
         choiceLabel: "Alpha API key",
+        groupLabel: "Alpha",
         appGuidedSecret: true,
       },
       {
@@ -656,6 +658,7 @@ describe("detectSetupInference", () => {
       {
         id: "alpha-api-key",
         brandId: "alpha",
+        groupLabel: "Alpha",
         label: "Alpha API key",
       },
       {
@@ -666,6 +669,7 @@ describe("detectSetupInference", () => {
       {
         id: "zeta-api-key",
         brandId: "zeta",
+        groupLabel: "Zeta",
         label: "Zeta API key",
         hint: "Direct key",
         icon: "https://cdn.example.com/zeta.svg",

@@ -104,11 +104,14 @@ describeControlUiE2e("Control UI Model Setup mocked Gateway E2E", () => {
       const activate = await gateway.waitForRequest("openclaw.setup.activate");
       expect(activate.params).toEqual({ kind: "codex-cli", modelRef: "openai/gpt-5" });
 
-      await page.getByText("Your AI is ready").waitFor();
+      await page.getByRole("heading", { name: "Connection verified" }).waitFor();
       await expect
-        .poll(async () => page.locator(".model-setup__success").textContent())
-        .toContain("openai/gpt-5 · 73 ms");
-      await page.getByRole("button", { name: "Open Chat" }).click();
+        .poll(async () => page.locator(".model-setup-success").textContent())
+        .toContain("openai/gpt-5");
+      await expect
+        .poll(async () => page.locator(".model-setup-success").textContent())
+        .toContain("Verified in 73 ms");
+      await page.getByRole("button", { name: "Start chatting" }).click();
       await expect.poll(() => new URL(page.url()).pathname).toBe("/custodian");
       expect(new URL(page.url()).searchParams.get("onboarding")).toBe("1");
       await page.getByRole("heading", { name: "OpenClaw", exact: true }).waitFor();
@@ -223,9 +226,9 @@ describeControlUiE2e("Control UI Model Setup mocked Gateway E2E", () => {
       await expect
         .poll(async () => (await gateway.getRequests("openclaw.setup.detect")).length)
         .toBe(detectCountBeforeCompletion + 1);
-      await page.getByText("Your AI is ready").waitFor();
+      await page.getByRole("heading", { name: "Connection verified" }).waitFor();
       await expect
-        .poll(async () => page.locator(".model-setup__success").textContent())
+        .poll(async () => page.locator(".model-setup-success").textContent())
         .toContain("provider/verified-model");
     } finally {
       await context.close();
@@ -245,7 +248,9 @@ describeControlUiE2e("Control UI Model Setup mocked Gateway E2E", () => {
         "chat.metadata",
         "chat.startup",
         "openclaw.setup.detect",
+        "openclaw.setup.activate",
         "openclaw.setup.auth.start",
+        "openclaw.setup.prepare.start",
       ],
       methodResponses: {
         "openclaw.setup.detect": {
@@ -264,13 +269,29 @@ describeControlUiE2e("Control UI Model Setup mocked Gateway E2E", () => {
           ],
           manualProviders: [
             {
-              id: "openai-api-key",
-              brandId: "openai",
-              label: "OpenAI API key",
+              id: "qwen-cn",
+              brandId: "qwen",
+              groupLabel: "Qwen Cloud",
+              label: "Coding Plan API Key for China (subscription)",
+              hint: "Endpoint: coding.dashscope.aliyuncs.com",
+            },
+            {
+              id: "qwen-global",
+              brandId: "qwen",
+              groupLabel: "Qwen Cloud",
+              label: "Coding Plan API Key for Global/Intl (subscription)",
+              hint: "Endpoint: coding-intl.dashscope.aliyuncs.com",
+            },
+            {
+              id: "zai-cn",
+              brandId: "zai",
+              groupLabel: "Z.AI",
+              label: "Coding-Plan-CN",
             },
             {
               id: "gemini-api-key",
               brandId: "google",
+              groupLabel: "Google",
               label: "Google Gemini API key",
               hint: "Use an AI Studio API key.",
             },
@@ -288,6 +309,12 @@ describeControlUiE2e("Control UI Model Setup mocked Gateway E2E", () => {
           workspace: "/tmp/openclaw-e2e",
           setupComplete: false,
         },
+        "openclaw.setup.activate": {
+          ok: true,
+          modelRef: "qwen/qwen3-coder-plus",
+          latencyMs: 412,
+          lines: ["Model ready"],
+        },
         "openclaw.setup.auth.start": {
           sessionId: "gemini-oauth-session",
           done: false,
@@ -303,36 +330,108 @@ describeControlUiE2e("Control UI Model Setup mocked Gateway E2E", () => {
       await page.getByRole("button", { name: "Sign in with Google" }).waitFor();
       await page.getByRole("button", { name: "Use API key" }).waitFor();
 
+      const providerPicker = page.locator(".model-setup-provider-select");
+      const providerTrigger = providerPicker.locator(".model-setup-provider-select__trigger");
+      await providerTrigger.click();
+      await expect
+        .poll(() =>
+          providerPicker.evaluate((element) => Boolean((element as HTMLDetailsElement).open)),
+        )
+        .toBe(true);
+      await expect
+        .poll(() => page.locator('[data-manual-provider="qwen-cn"]').getAttribute("aria-label"))
+        .toContain("Qwen Cloud");
+      await expect
+        .poll(() => page.locator('[data-manual-provider="zai-cn"]').getAttribute("aria-label"))
+        .toContain("Z.AI");
+      await expect
+        .poll(() =>
+          page.locator('[data-manual-provider="qwen-cn"] [data-provider-icon="alibaba"]').count(),
+        )
+        .toBe(1);
+
       if (artifactDir) {
         await mkdir(artifactDir, { recursive: true });
         await page.screenshot({
           animations: "disabled",
           fullPage: true,
-          path: path.join(artifactDir, "after-desktop.png"),
+          path: path.join(artifactDir, "provider-picker-desktop.png"),
         });
         await page.setViewportSize({ height: 844, width: 390 });
+        await providerPicker.scrollIntoViewIfNeeded();
         await page.screenshot({
           animations: "disabled",
-          fullPage: true,
-          path: path.join(artifactDir, "after-mobile.png"),
+          path: path.join(artifactDir, "provider-picker-mobile.png"),
         });
         await page.setViewportSize({ height: 1000, width: 1440 });
       }
+      await page.keyboard.press("Escape");
+      await expect
+        .poll(() =>
+          providerPicker.evaluate((element) => Boolean((element as HTMLDetailsElement).open)),
+        )
+        .toBe(false);
 
       const accessValue = page.locator('.model-setup__manual input[type="password"]');
       await accessValue.fill("sk-old-provider-secret");
       await page.getByRole("button", { name: "Use API key" }).click();
-      const provider = page.locator(".model-setup__manual select");
-      await expect.poll(() => provider.inputValue()).toBe("gemini-api-key");
+      await expect.poll(() => providerTrigger.textContent()).toContain("Google");
       await expect.poll(() => accessValue.inputValue()).toBe("");
       await expect
         .poll(() => accessValue.evaluate((element) => element === document.activeElement))
         .toBe(true);
 
-      await accessValue.fill("gemini-secret");
-      await provider.selectOption("openai-api-key");
-      await expect.poll(() => accessValue.inputValue()).toBe("");
+      await providerTrigger.click();
+      await page.locator('[data-manual-provider="qwen-cn"]').click();
+      await expect
+        .poll(() =>
+          providerPicker.evaluate((element) => Boolean((element as HTMLDetailsElement).open)),
+        )
+        .toBe(false);
+      await expect.poll(() => providerTrigger.textContent()).toContain("Qwen Cloud");
+      await accessValue.fill("qwen-test-secret");
+      await expect.poll(() => accessValue.inputValue()).toBe("qwen-test-secret");
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+      );
+      await page.getByRole("button", { name: "Connect & verify" }).click();
+      const activate = await gateway.waitForRequest("openclaw.setup.activate");
+      expect(activate.params).toEqual({
+        kind: "api-key",
+        authChoice: "qwen-cn",
+        apiKey: "qwen-test-secret",
+      });
+      await page.getByRole("heading", { name: "Connection verified" }).waitFor();
+      await page.getByText("qwen/qwen3-coder-plus", { exact: true }).waitFor();
+
+      if (artifactDir) {
+        await page.screenshot({
+          animations: "disabled",
+          fullPage: true,
+          path: path.join(artifactDir, "success-desktop.png"),
+        });
+        await page.setViewportSize({ height: 844, width: 390 });
+        await page.screenshot({
+          animations: "disabled",
+          fullPage: true,
+          path: path.join(artifactDir, "success-mobile.png"),
+        });
+        await page.setViewportSize({ height: 1000, width: 1440 });
+      }
+      await expect
+        .poll(() => page.locator(".model-setup-success").textContent())
+        .toContain("Verified in 412 ms");
+
+      const detectCountBeforeDismiss = (await gateway.getRequests("openclaw.setup.detect")).length;
+      await page.getByRole("button", { name: "Stay in settings" }).click();
+      await expect
+        .poll(async () => (await gateway.getRequests("openclaw.setup.detect")).length)
+        .toBe(detectCountBeforeDismiss + 1);
       await page.getByRole("button", { name: "Use API key" }).click();
+      await expect.poll(() => providerTrigger.textContent()).toContain("Google");
 
       const detectCount = (await gateway.getRequests("openclaw.setup.detect")).length;
       await page

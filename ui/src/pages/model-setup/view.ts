@@ -1,5 +1,7 @@
 import { html, nothing, type TemplateResult } from "lit";
 import type { SystemAgentSetupDetectResult } from "../../api/types.ts";
+import { icons } from "../../components/icons.ts";
+import "../../components/modal-dialog.ts";
 import {
   hasProviderBrandIcon,
   renderProviderBrandIcon,
@@ -19,6 +21,7 @@ import { renderModelSetupWizard } from "./wizard-view.ts";
 
 type Candidate = SystemAgentSetupDetectResult["candidates"][number];
 type AuthOption = NonNullable<SystemAgentSetupDetectResult["authOptions"]>[number];
+type ManualProvider = SystemAgentSetupDetectResult["manualProviders"][number];
 type SetupIconEntry = {
   brandId?: string;
   label: string;
@@ -87,6 +90,7 @@ type ModelSetupViewProps = {
   onMoreSignInToggle: (open: boolean) => void;
   onIconError: (iconUrl: string) => void;
   onOpenChat: () => void;
+  onSuccessClose: () => void;
   onWizardValueChange: (value: unknown) => void;
   onWizardAnswer: (value: unknown, includeValue?: boolean) => void;
   onWizardCancel: () => void;
@@ -119,27 +123,44 @@ function failureLabel(status: string): string {
   return labels[status] ?? labels.unknown!;
 }
 
-function renderSuccess(
+function renderSuccessDialog(
   activation: Extract<ModelSetupActivationState, { phase: "success" }>,
   onOpenChat: () => void,
+  onClose: () => void,
 ) {
   return html`
-    <div class="model-setup__success" role="status">
-      <div>
-        <strong>${t("modelSetup.success.title")}</strong>
-        <div>
-          ${activation.latencyMs === undefined
-            ? activation.modelRef
-            : t("modelSetup.success.detail", {
-                modelRef: activation.modelRef,
-                latencyMs: String(activation.latencyMs),
-              })}
+    <openclaw-modal-dialog
+      label=${t("modelSetup.success.title")}
+      description=${t("modelSetup.success.body", { modelRef: activation.modelRef })}
+      @modal-cancel=${onClose}
+    >
+      <section class="model-setup-success" role="status">
+        <div class="model-setup-success__icon" aria-hidden="true">${icons.shieldCheck}</div>
+        <div class="model-setup-success__copy">
+          <h2>${t("modelSetup.success.title")}</h2>
+          <p>${t("modelSetup.success.body", { modelRef: activation.modelRef })}</p>
         </div>
-      </div>
-      <button type="button" class="btn primary" @click=${onOpenChat}>
-        ${t("modelSetup.success.openChat")}
-      </button>
-    </div>
+        <div class="model-setup-success__summary">
+          <span>${t("modelSetup.success.activeModel")}</span>
+          <strong>${activation.modelRef}</strong>
+          ${activation.latencyMs === undefined
+            ? nothing
+            : html`<span>
+                ${t("modelSetup.success.latency", {
+                  latencyMs: String(activation.latencyMs),
+                })}
+              </span>`}
+        </div>
+        <footer class="model-setup-success__actions">
+          <button type="button" class="btn" @click=${onClose}>
+            ${t("modelSetup.success.stayHere")}
+          </button>
+          <button type="button" class="btn primary" autofocus @click=${onOpenChat}>
+            ${icons.messageSquare} ${t("modelSetup.success.openChat")}
+          </button>
+        </footer>
+      </section>
+    </openclaw-modal-dialog>
   `;
 }
 
@@ -435,13 +456,216 @@ function renderPrepare(props: ModelSetupViewProps, result: SystemAgentSetupDetec
                 ?disabled=${props.actionsDisabled}
                 @click=${() => props.onStartPrepare(option)}
               >
-                ${t("modelSetup.prepare.button")}
+                ${option.id === "ollama"
+                  ? t("modelSetup.prepare.ollamaButton")
+                  : t("modelSetup.prepare.button")}
               </button>
             </div>
           `,
         )}
       </div>
     </section>
+  `;
+}
+
+function manualProviderName(provider: ManualProvider): string {
+  return provider.groupLabel?.trim() || provider.label;
+}
+
+function manualProviderMethod(provider: ManualProvider): string | undefined {
+  const method = provider.label.trim();
+  return method === manualProviderName(provider) ? undefined : method;
+}
+
+const providerPickerTypeahead = new WeakMap<
+  HTMLDetailsElement,
+  { query: string; updatedAt: number }
+>();
+
+function providerPickerOptions(details: HTMLDetailsElement): HTMLButtonElement[] {
+  return Array.from(
+    details.querySelectorAll<HTMLButtonElement>(
+      ".model-setup-provider-select__option:not(:disabled)",
+    ),
+  );
+}
+
+function focusProviderPickerOption(details: HTMLDetailsElement, index: number): void {
+  providerPickerOptions(details)[index]?.focus();
+}
+
+function handleProviderPickerKeydown(event: KeyboardEvent): void {
+  const details = event.currentTarget as HTMLDetailsElement;
+  const trigger = details.querySelector<HTMLElement>("summary");
+  const options = providerPickerOptions(details);
+
+  if (event.key === "Escape" && details.open) {
+    event.preventDefault();
+    event.stopPropagation();
+    details.open = false;
+    trigger?.focus({ preventScroll: true });
+    return;
+  }
+
+  const activeIndex = options.findIndex((option) => option === document.activeElement);
+  const selectedIndex = options.findIndex((option) => option.dataset.selected !== undefined);
+  let nextIndex: number | undefined;
+  if (event.key === "ArrowDown") {
+    nextIndex = activeIndex < 0 ? Math.max(selectedIndex, 0) : (activeIndex + 1) % options.length;
+  } else if (event.key === "ArrowUp") {
+    nextIndex =
+      activeIndex < 0
+        ? selectedIndex >= 0
+          ? selectedIndex
+          : options.length - 1
+        : (activeIndex - 1 + options.length) % options.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = options.length - 1;
+  }
+
+  if (nextIndex !== undefined && options.length > 0) {
+    event.preventDefault();
+    event.stopPropagation();
+    details.open = true;
+    focusProviderPickerOption(details, nextIndex);
+    return;
+  }
+
+  if (
+    event.key.length !== 1 ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    options.length === 0
+  ) {
+    return;
+  }
+
+  const now = Date.now();
+  const previous = providerPickerTypeahead.get(details);
+  const query =
+    previous && now - previous.updatedAt < 700
+      ? `${previous.query}${event.key.toLocaleLowerCase()}`
+      : event.key.toLocaleLowerCase();
+  providerPickerTypeahead.set(details, { query, updatedAt: now });
+  const startIndex = Math.max(activeIndex, -1);
+  const matchOffset = Array.from({ length: options.length }, (_, offset) => {
+    return options[(startIndex + offset + 1) % options.length];
+  }).findIndex((option) => option?.dataset.searchText?.startsWith(query));
+  if (matchOffset < 0) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  details.open = true;
+  focusProviderPickerOption(details, (startIndex + matchOffset + 1) % options.length);
+}
+
+function renderManualProviderPicker(
+  props: ModelSetupViewProps,
+  result: SystemAgentSetupDetectResult,
+  provider: ManualProvider | undefined,
+) {
+  const providerMethod = provider ? manualProviderMethod(provider) : undefined;
+  const triggerLabel = provider
+    ? [manualProviderName(provider), providerMethod].filter(Boolean).join(", ")
+    : t("modelSetup.manual.selectProvider");
+  return html`
+    <details
+      class="model-setup-provider-select"
+      ?data-disabled=${props.actionsDisabled || result.manualProviders.length === 0}
+      @click=${(event: MouseEvent) => {
+        if (
+          (props.actionsDisabled || result.manualProviders.length === 0) &&
+          event.target instanceof Element &&
+          event.target.closest("summary")
+        ) {
+          event.preventDefault();
+        }
+      }}
+      @keydown=${handleProviderPickerKeydown}
+      @focusout=${(event: FocusEvent) => {
+        const details = event.currentTarget as HTMLDetailsElement;
+        const nextTarget = event.relatedTarget;
+        if (!details.open || (nextTarget instanceof Node && details.contains(nextTarget))) {
+          return;
+        }
+        details.open = false;
+      }}
+    >
+      <summary
+        class="model-setup-provider-select__trigger"
+        aria-label=${`${t("modelSetup.manual.provider")}: ${triggerLabel}`}
+        aria-disabled=${String(props.actionsDisabled || result.manualProviders.length === 0)}
+      >
+        ${provider
+          ? renderProviderIcon(props, provider, "model-setup__icon--picker")
+          : html`<span class="model-setup-provider-select__placeholder-icon" aria-hidden="true">
+              ${icons.key}
+            </span>`}
+        <span class="model-setup-provider-select__copy">
+          <strong>
+            ${provider ? manualProviderName(provider) : t("modelSetup.manual.selectProvider")}
+          </strong>
+          ${provider
+            ? providerMethod
+              ? html`<span>${providerMethod}</span>`
+              : nothing
+            : html`<span>${t("modelSetup.manual.selectProviderHint")}</span>`}
+        </span>
+        <span class="model-setup-provider-select__chevron" aria-hidden="true">
+          ${icons.chevronDown}
+        </span>
+      </summary>
+      <div
+        class="model-setup-provider-select__menu"
+        role="listbox"
+        aria-label=${t("modelSetup.manual.provider")}
+      >
+        ${result.manualProviders.map((entry) => {
+          const selected = entry.id === props.manualProviderId;
+          const entryMethod = manualProviderMethod(entry);
+          const accessibleLabel = [manualProviderName(entry), entryMethod, entry.hint]
+            .filter(Boolean)
+            .join(", ");
+          return html`
+            <button
+              type="button"
+              class="model-setup-provider-select__option"
+              data-manual-provider=${entry.id}
+              ?data-selected=${selected}
+              role="option"
+              aria-selected=${String(selected)}
+              aria-label=${accessibleLabel}
+              data-search-text=${accessibleLabel.toLocaleLowerCase()}
+              ?disabled=${props.actionsDisabled}
+              @click=${(event: MouseEvent) => {
+                const details = (event.currentTarget as HTMLElement).closest("details");
+                details?.removeAttribute("open");
+                details?.querySelector<HTMLElement>("summary")?.focus({ preventScroll: true });
+                if (!selected) {
+                  props.onManualProviderChange(entry.id);
+                }
+              }}
+            >
+              ${renderProviderIcon(props, entry, "model-setup__icon--picker")}
+              <span class="model-setup-provider-select__copy">
+                <strong>${manualProviderName(entry)}</strong>
+                ${entryMethod ? html`<span>${entryMethod}</span>` : nothing}
+                ${entry.hint ? html`<small>${entry.hint}</small>` : nothing}
+              </span>
+              ${selected
+                ? html`<span class="model-setup-provider-select__selected" aria-hidden="true">
+                    ${icons.check}
+                  </span>`
+                : nothing}
+            </button>
+          `;
+        })}
+      </div>
+    </details>
   `;
 }
 
@@ -459,31 +683,16 @@ function renderManual(props: ModelSetupViewProps, result: SystemAgentSetupDetect
         <h2>${t("modelSetup.manual.title")}</h2>
       </div>
       <div class="model-setup__manual">
-        <label class="field">
+        <div class="field">
           <span>${t("modelSetup.manual.provider")}</span>
-          <div class="model-setup__manual-provider">
-            ${provider ? renderProviderIcon(props, provider) : nothing}
-            <select
-              ?disabled=${props.actionsDisabled}
-              @change=${(event: Event) =>
-                props.onManualProviderChange((event.currentTarget as HTMLSelectElement).value)}
-            >
-              <option value="" ?selected=${!props.manualProviderId}>
-                ${t("modelSetup.manual.selectProvider")}
-              </option>
-              ${result.manualProviders.map(
-                (entry) => html`
-                  <option value=${entry.id} ?selected=${entry.id === props.manualProviderId}>
-                    ${entry.label}
-                  </option>
-                `,
-              )}
-            </select>
-          </div>
-        </label>
-        ${provider?.hint ? html`<div class="muted">${provider.hint}</div>` : nothing}
+          ${renderManualProviderPicker(props, result, provider)}
+        </div>
         <label class="field">
-          <span>${t("modelSetup.manual.accessValue")}</span>
+          <span>
+            ${provider
+              ? t("modelSetup.manual.accessValueFor", { provider: manualProviderName(provider) })
+              : t("modelSetup.manual.accessValue")}
+          </span>
           <input
             class="input"
             type="password"
@@ -495,6 +704,10 @@ function renderManual(props: ModelSetupViewProps, result: SystemAgentSetupDetect
               props.onManualApiKeyChange((event.currentTarget as HTMLInputElement).value)}
           />
         </label>
+        <div class="model-setup__manual-help">
+          ${icons.shieldCheck}
+          <span>${t("modelSetup.manual.verifyHint")}</span>
+        </div>
         ${props.manualError
           ? html`<div class="callout danger" role="alert">${props.manualError}</div>`
           : nothing}
@@ -514,7 +727,9 @@ function renderManual(props: ModelSetupViewProps, result: SystemAgentSetupDetect
           ?disabled=${props.actionsDisabled || !props.manualProviderId}
           @click=${props.onManualConnect}
         >
-          ${testing ? t("modelSetup.candidates.testingButton") : t("modelSetup.manual.connect")}
+          ${testing
+            ? t("modelSetup.candidates.testingButton")
+            : t("modelSetup.manual.connectAndVerify")}
         </button>
       </div>
     </section>
@@ -522,9 +737,6 @@ function renderManual(props: ModelSetupViewProps, result: SystemAgentSetupDetect
 }
 
 function renderReady(props: ModelSetupViewProps, result: SystemAgentSetupDetectResult) {
-  if (props.activation.phase === "success") {
-    return renderSuccess(props.activation, props.onOpenChat);
-  }
   const current = result.configuredModel
     ? renderCurrentConnection(props, result.configuredModel)
     : nothing;
@@ -595,5 +807,8 @@ export function renderModelSetup(props: ModelSetupViewProps): TemplateResult {
       onCancel: props.onWizardCancel,
       onClose: props.onWizardClose,
     })}
+    ${props.activation.phase === "success"
+      ? renderSuccessDialog(props.activation, props.onOpenChat, props.onSuccessClose)
+      : nothing}
   `;
 }

@@ -36,12 +36,14 @@ const detected: SystemAgentSetupDetectResult = {
     {
       id: "gemini-api-key",
       brandId: "google",
+      groupLabel: "Google",
       label: "Google Gemini API key",
       hint: "Use an AI Studio API key.",
     },
     {
       id: "openai",
       brandId: "openai",
+      groupLabel: "OpenAI",
       label: "OpenAI",
       hint: "Use a project API key.",
       icon: "https://cdn.example.com/openai.png",
@@ -121,6 +123,7 @@ function props(overrides: Partial<ModelSetupViewProps> = {}): ModelSetupViewProp
     onMoreSignInToggle: vi.fn(),
     onIconError: vi.fn(),
     onOpenChat: vi.fn(),
+    onSuccessClose: vi.fn(),
     onWizardValueChange: vi.fn(),
     onWizardAnswer: vi.fn(),
     onWizardCancel: vi.fn(),
@@ -180,8 +183,11 @@ describe("renderModelSetup", () => {
     expect(text(container)).toContain("Sign in with a provider");
     expect(text(container)).toContain("Set up a local model");
     expect(text(container)).toContain("Connect with an API key or token");
-    expect(container.querySelector<HTMLSelectElement>(".model-setup__manual select")?.value).toBe(
-      "openai",
+    expect(
+      container.querySelector('[data-manual-provider="openai"][data-selected]'),
+    ).not.toBeNull();
+    expect(text(container.querySelector(".model-setup-provider-select__trigger")!)).toContain(
+      "OpenAI",
     );
     expect(container.querySelector('input[type="password"]')).not.toBeNull();
     expect(container.querySelector("details")?.open).toBe(false);
@@ -202,6 +208,174 @@ describe("renderModelSetup", () => {
         ?.textContent,
     ).toContain("O");
     expect(container.querySelectorAll("img")).toHaveLength(0);
+  });
+
+  it("identifies provider families separately from their credential methods", () => {
+    const container = mount(
+      props({
+        manualProviderId: "qwen-cn",
+        page: {
+          phase: "ready",
+          result: {
+            ...detected,
+            manualProviders: [
+              {
+                id: "qwen-cn",
+                brandId: "qwen",
+                groupLabel: "Qwen Cloud",
+                label: "Coding Plan API Key for China (subscription)",
+                hint: "Endpoint: coding.dashscope.aliyuncs.com",
+              },
+              {
+                id: "zai-cn",
+                brandId: "zai",
+                groupLabel: "Z.AI",
+                label: "Coding-Plan-CN",
+              },
+            ],
+          },
+        },
+      }),
+    );
+
+    expect(text(container.querySelector(".model-setup-provider-select__trigger")!)).toContain(
+      "Qwen Cloud Coding Plan API Key for China (subscription)",
+    );
+    expect(
+      container.querySelector('[data-manual-provider="qwen-cn"] [data-provider-icon="alibaba"]'),
+    ).not.toBeNull();
+    expect(text(container.querySelector('[data-manual-provider="zai-cn"]')!)).toContain(
+      "Z.AI Coding-Plan-CN",
+    );
+  });
+
+  it("closes the provider picker on Escape without leaking the app shortcut", () => {
+    const container = mount(props());
+    const picker = container.querySelector<HTMLDetailsElement>(".model-setup-provider-select")!;
+    const leaked = vi.fn();
+    container.addEventListener("keydown", leaked);
+    picker.open = true;
+
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "Escape",
+    });
+    picker.dispatchEvent(event);
+
+    expect(picker.open).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
+    expect(leaked).not.toHaveBeenCalled();
+  });
+
+  it("keeps the credential when the selected provider is chosen again", () => {
+    const onManualProviderChange = vi.fn();
+    const container = mount(props({ onManualProviderChange }));
+    const picker = container.querySelector<HTMLDetailsElement>(".model-setup-provider-select")!;
+    const trigger = picker.querySelector<HTMLElement>("summary")!;
+    picker.open = true;
+
+    picker.querySelector<HTMLButtonElement>('[data-manual-provider="openai"]')?.click();
+
+    expect(onManualProviderChange).not.toHaveBeenCalled();
+    expect(picker.open).toBe(false);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("supports arrow, boundary, and typeahead navigation in the provider picker", () => {
+    const container = mount(
+      props({
+        manualProviderId: "openai",
+        page: {
+          phase: "ready",
+          result: {
+            ...detected,
+            manualProviders: [
+              ...detected.manualProviders,
+              { id: "zai", groupLabel: "Z.AI", label: "API key" },
+            ],
+          },
+        },
+      }),
+    );
+    const picker = container.querySelector<HTMLDetailsElement>(".model-setup-provider-select")!;
+    const trigger = picker.querySelector<HTMLElement>("summary")!;
+    trigger.focus();
+
+    trigger.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "ArrowDown" }),
+    );
+    expect(document.activeElement).toBe(picker.querySelector('[data-manual-provider="openai"]'));
+
+    picker.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "End" }),
+    );
+    expect(document.activeElement).toBe(picker.querySelector('[data-manual-provider="zai"]'));
+
+    picker.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "g" }),
+    );
+    expect(document.activeElement).toBe(
+      picker.querySelector('[data-manual-provider="gemini-api-key"]'),
+    );
+  });
+
+  it("closes the provider picker when keyboard focus leaves it", () => {
+    const container = mount(props());
+    const picker = container.querySelector<HTMLDetailsElement>(".model-setup-provider-select")!;
+    const option = picker.querySelector<HTMLButtonElement>('[data-manual-provider="openai"]')!;
+    const credential = container.querySelector<HTMLInputElement>('input[type="password"]')!;
+    picker.open = true;
+    option.focus();
+
+    credential.focus();
+
+    expect(picker.open).toBe(false);
+    expect(document.activeElement).toBe(credential);
+  });
+
+  it("does not repeat the method when an older gateway omits the provider group", () => {
+    const container = mount(
+      props({
+        manualProviderId: "legacy",
+        page: {
+          phase: "ready",
+          result: {
+            ...detected,
+            manualProviders: [{ id: "legacy", label: "Legacy provider" }],
+          },
+        },
+      }),
+    );
+    const trigger = container.querySelector(".model-setup-provider-select__trigger")!;
+    const option = container.querySelector('[data-manual-provider="legacy"]')!;
+
+    expect(trigger.querySelector("strong")?.textContent?.trim()).toBe("Legacy provider");
+    expect(trigger.querySelector(".model-setup-provider-select__copy > span")).toBeNull();
+    expect(option.getAttribute("aria-label")).toBe("Legacy provider");
+  });
+
+  it("shows verified connections in an actionable success dialog", () => {
+    const onOpenChat = vi.fn();
+    const onSuccessClose = vi.fn();
+    const container = mount(
+      props({
+        activation: { phase: "success", modelRef: "openai/gpt-5.6-sol", latencyMs: 73 },
+        onOpenChat,
+        onSuccessClose,
+      }),
+    );
+
+    const dialog = container.querySelector('openclaw-modal-dialog[label="Connection verified"]');
+    expect(dialog).not.toBeNull();
+    expect(text(dialog!)).toContain(
+      "OpenClaw received a real reply from openai/gpt-5.6-sol. You can start chatting now.",
+    );
+    expect(text(dialog!)).toContain("Verified in 73 ms");
+    dialog?.querySelector<HTMLButtonElement>(".primary")?.click();
+    expect(onOpenChat).toHaveBeenCalledOnce();
+    dialog?.querySelectorAll<HTMLButtonElement>("button").item(0).click();
+    expect(onSuccessClose).toHaveBeenCalledOnce();
   });
 
   it("offers direct recovery actions for an unavailable provider", () => {
@@ -237,7 +411,7 @@ describe("renderModelSetup", () => {
     const llamaCpp = container.querySelector<HTMLButtonElement>(
       '[data-prepare-choice="llama-cpp"] button',
     );
-    expect(ollama?.textContent).toContain("Set up / Download model");
+    expect(ollama?.textContent).toContain("Check & set up");
     expect(llamaCpp).not.toBeNull();
     ollama?.click();
     expect(onStartPrepare).toHaveBeenCalledWith(expect.objectContaining({ id: "ollama" }));
@@ -482,7 +656,7 @@ describe("renderModelSetup", () => {
     expect(old.querySelector(".settings-section")).toBeNull();
   });
 
-  it("renders the success banner and opens chat", () => {
+  it("keeps setup context behind the success dialog and opens chat", () => {
     const onOpenChat = vi.fn();
     const container = mount(
       props({
@@ -490,11 +664,11 @@ describe("renderModelSetup", () => {
         onOpenChat,
       }),
     );
-    expect(text(container)).toContain("Your AI is ready");
-    expect(text(container)).toContain("openai/gpt-5 · 91 ms");
-    container.querySelector<HTMLButtonElement>(".model-setup__success button")?.click();
+    expect(text(container)).toContain("Connection verified");
+    expect(text(container)).toContain("Verified in 91 ms");
+    container.querySelector<HTMLButtonElement>(".model-setup-success .primary")?.click();
     expect(onOpenChat).toHaveBeenCalledOnce();
-    expect(container.querySelector(".settings-section")).toBeNull();
+    expect(container.querySelector(".settings-section")).not.toBeNull();
   });
 
   it("renders an idle current connection and verifies it", () => {
