@@ -232,6 +232,9 @@ async function resolveActiveWakeWithRetries(
   message: string,
   wakeOptions: EmbeddedAgentQueueMessageOptions,
   signal?: AbortSignal,
+  options?: {
+    allowBestEffortTranscriptFallback?: boolean;
+  },
 ): Promise<EmbeddedAgentQueueMessageOutcome> {
   // Bound the whole active wake by the caller's delivery window. Each retry
   // passes only the remaining window into transcript-commit waiting so a
@@ -263,7 +266,8 @@ async function resolveActiveWakeWithRetries(
     }
     if (
       outcome.reason === "transcript_commit_wait_unsupported" &&
-      currentOptions.waitForTranscriptCommit === true
+      currentOptions.waitForTranscriptCommit === true &&
+      options?.allowBestEffortTranscriptFallback !== false
     ) {
       const bestEffortOptions = { ...currentOptions };
       delete bestEffortOptions.waitForTranscriptCommit;
@@ -1169,6 +1173,7 @@ async function sendSubagentAnnounceDirectly(params: {
       normalizeOptionalLowercaseString(params.sourceTool) ??
       (params.expectsCompletionMessage ? "subagent_announce" : "");
     const isSubagentCompletion = sourceToolId === "subagent_announce";
+    const isAgentHarnessCompletion = sourceToolId === "agent_harness_task";
     const agentMediatedCompletion = requiresAgentMediatedCompletionDelivery({
       expectsCompletionMessage: params.expectsCompletionMessage,
       sourceTool: sourceToolId,
@@ -1324,14 +1329,14 @@ async function sendSubagentAnnounceDirectly(params: {
           : {}),
         waitForTranscriptCommit: true,
       };
-      // Reuse the shared active-wake retry helper so the generated-completion
-      // wake also waits through compaction (and best-effort transcript retry)
-      // instead of treating a compacting run as a terminal wake failure.
+      // Completion delivery must be transcript-committed before it is reported
+      // as handed off. A best-effort steer can be lost when the requester yields.
       const wakeOutcome = await resolveActiveWakeWithRetries(
         requesterActivity.sessionId,
         params.triggerMessage,
         wakeOptions,
         params.signal,
+        { allowBestEffortTranscriptFallback: !isAgentHarnessCompletion },
       );
       if (wakeOutcome.queued) {
         return {
@@ -1339,6 +1344,15 @@ async function sendSubagentAnnounceDirectly(params: {
           deliveredAt: wakeOutcome.deliveredAtMs,
           enqueuedAt: wakeOutcome.enqueuedAtMs,
           path: "steered",
+        };
+      }
+      if (wakeOutcome.reason === "transcript_commit_wait_unsupported" && isAgentHarnessCompletion) {
+        // Native harnesses retry this completion after the parent yields.
+        // Starting another requester turn here would compete for the same lane.
+        return {
+          delivered: false,
+          path: "none",
+          reason: "completion_handoff_pending",
         };
       }
       activeRequesterWakeFailed = true;
@@ -1423,6 +1437,8 @@ async function sendSubagentAnnounceDirectly(params: {
         ? { sourceReplyDeliveryMode: completionSourceReplyDeliveryMode }
         : {}),
       idempotencyKey: params.directIdempotencyKey,
+      // Bound the agent turn by the same deadline as the dispatch waiting on it.
+      timeout: Math.max(1, Math.ceil(announceTimeoutMs / 1_000)),
     };
     let directAnnounceResponse: unknown;
     try {

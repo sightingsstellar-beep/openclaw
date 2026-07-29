@@ -1080,6 +1080,44 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
     expect(callGateway).not.toHaveBeenCalled();
   });
 
+  it("defers an agent-harness completion until its active requester yields", async () => {
+    const callGateway = createGatewayMock();
+    const queueEmbeddedAgentMessageWithOutcome = createQueueOutcomeSequenceMock([
+      "transcript_commit_wait_unsupported",
+    ]);
+    const result = await deliverSlackThreadAnnouncement({
+      callGateway,
+      sessionId: "requester-session-1",
+      isActive: true,
+      directIdempotencyKey: "announce-agent-harness-pending",
+      queueEmbeddedAgentMessageWithOutcome,
+      sourceTool: "agent_harness_task",
+      internalEvents: taskCompletionEvents({
+        childSessionKey: "codex-native:child",
+        childSessionId: "child-thread-id",
+        taskLabel: "Codex native subagent",
+        result: "child completion output",
+      }),
+    });
+
+    expectRecordFields(result, {
+      delivered: false,
+      path: "none",
+      reason: "completion_handoff_pending",
+    });
+    expect(queueEmbeddedAgentMessageWithOutcome).toHaveBeenCalledTimes(1);
+    expect(callGateway).not.toHaveBeenCalled();
+    expect(result.phases).toEqual([
+      {
+        phase: "direct-primary",
+        delivered: false,
+        path: "none",
+        reason: "completion_handoff_pending",
+        error: undefined,
+      },
+    ]);
+  });
+
   it("keeps direct external delivery for dormant completion requesters", async () => {
     const callGateway = createGatewayMock();
     const queueEmbeddedAgentMessageWithOutcome = createQueueOutcomeMock(false);
@@ -1315,6 +1353,7 @@ describe("deliverSubagentAnnouncement completion delivery", () => {
       to: "channel:C123",
       threadId: "171.222",
       bestEffortDeliver: true,
+      timeout: 120,
     });
     const dispatchOptions = mockCallArg(dispatchGatewayMethodInProcess, 0, 2);
     expect(dispatchOptions).toMatchObject({

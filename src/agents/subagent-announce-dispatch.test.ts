@@ -118,6 +118,38 @@ describe("runSubagentAnnounceDispatch", () => {
     ]);
   });
 
+  it("keeps an active requester completion pending without fallback steering", async () => {
+    const steer = vi.fn(async () => ({ status: "steered" }) as const);
+    const direct = vi.fn(async () => ({
+      delivered: false,
+      path: "none" as const,
+      reason: "completion_handoff_pending" as const,
+    }));
+
+    const result = await runSubagentAnnounceDispatch({
+      expectsCompletionMessage: true,
+      steer,
+      direct,
+    });
+
+    expect(direct).toHaveBeenCalledTimes(1);
+    expect(steer).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      delivered: false,
+      path: "none",
+      reason: "completion_handoff_pending",
+      phases: [
+        {
+          phase: "direct-primary",
+          delivered: false,
+          path: "none",
+          reason: "completion_handoff_pending",
+          error: undefined,
+        },
+      ],
+    });
+  });
+
   it("returns direct failure when completion fallback steering cannot deliver", async () => {
     const steer = vi.fn(async () => ({ status: "none" }) as const);
     const direct = vi.fn(async () => ({
