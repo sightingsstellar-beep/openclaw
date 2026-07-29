@@ -199,11 +199,13 @@ export function createCodexAttemptNotificationController(
         if (!state.timedOut && !runAbortController.signal.aborted) {
           await steeringQueue?.flushPending();
         }
-        state.completed = true;
         turnWatches.clearCompletionIdleTimer();
         turnWatches.clearAssistantCompletionIdleTimer();
         turnWatches.clearTerminalIdleTimer();
-        state.resolveCompletion?.();
+        if (!turnWatches.isNativeSubagentIdleReleasePending()) {
+          state.completed = true;
+          state.resolveCompletion?.();
+        }
       }
     }
   };

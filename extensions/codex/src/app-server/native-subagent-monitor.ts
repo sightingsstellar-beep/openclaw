@@ -110,6 +110,12 @@ type MonitorOptions = {
   retainClient?: () => (() => void) | undefined;
 };
 
+type NativeSubagentMonitorRegistration = {
+  unregister: () => void;
+  hasUnsettledChildren: () => boolean;
+  expeditePendingCompletionDelivery: () => void;
+};
+
 const DEFAULT_RECOVERY_POLL_DELAYS_MS = [
   2_000, 5_000, 10_000, 15_000, 30_000, 60_000, 120_000, 300_000,
 ];
@@ -153,7 +159,7 @@ function registerMonitor(params: {
   agentId?: string;
   runtime?: NativeSubagentMonitorRuntime;
   retainClient?: () => (() => void) | undefined;
-}): { unregister: () => void } {
+}): NativeSubagentMonitorRegistration {
   let monitor = monitors.get(params.client);
   if (!monitor) {
     monitor = new Monitor(params.client, params.runtime ?? defaultRuntime, {
@@ -247,7 +253,7 @@ class Monitor {
     requesterSessionKey?: string;
     taskRuntimeScope?: AgentHarnessTaskRuntimeScope;
     agentId?: string;
-  }): { unregister: () => void } {
+  }): NativeSubagentMonitorRegistration {
     const parentThreadId = params.parentThreadId.trim();
     if (!parentThreadId) {
       throw new Error("Codex native subagent monitor requires a parent thread id");
@@ -288,6 +294,9 @@ class Monitor {
       });
     });
     return {
+      hasUnsettledChildren: () => this.hasUnsettledChildren(parentThreadId),
+      expeditePendingCompletionDelivery: () =>
+        this.expeditePendingCompletionDelivery(parentThreadId),
       unregister: () => {
         if (!registered) {
           return;
@@ -300,6 +309,39 @@ class Monitor {
         }
       },
     };
+  }
+
+  /** Returns whether a parent still has child work or completion delivery in flight. */
+  hasUnsettledChildren(parentThreadId: string): boolean {
+    for (const childState of this.childStates.values()) {
+      if (
+        childState.parentThreadId === parentThreadId &&
+        (childState.pendingCompletion !== undefined ||
+          childState.deliveringCompletion ||
+          (!childState.terminal && !childState.settledWithoutCompletion))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Resets pending completion backoff after the parent yields its session lane. */
+  expeditePendingCompletionDelivery(parentThreadId: string): void {
+    for (const childState of this.childStates.values()) {
+      if (childState.parentThreadId !== parentThreadId || !childState.pendingCompletion) {
+        continue;
+      }
+      if (childState.completionDeliveryTimer) {
+        clearTimeout(childState.completionDeliveryTimer);
+        childState.completionDeliveryTimer = undefined;
+      }
+      childState.completionDeliveryAttempt = 0;
+      this.scheduleCompletionDeliveryRetry(
+        childState,
+        "completion delivery remains pending after parent yield",
+      );
+    }
   }
 
   private prepareParentTaskRuntime(state: ParentState): void {

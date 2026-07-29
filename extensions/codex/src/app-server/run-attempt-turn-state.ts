@@ -1,7 +1,7 @@
 import { emitTrustedDiagnosticEvent } from "openclaw/plugin-sdk/diagnostic-runtime";
 import {
   CODEX_APP_SERVER_INTERRUPT_TIMEOUT_MS,
-  interruptCodexTurnBestEffort,
+  interruptCodexTurnWithAck,
 } from "./attempt-client-cleanup.js";
 import { createCodexSteeringQueue } from "./attempt-steering.js";
 import {
@@ -38,6 +38,7 @@ export function createCodexAttemptTurnState(resources: CodexAttemptResources) {
     startupTimeoutMs,
   } = resources;
   const { context } = prompt;
+  const { toolState } = context.attemptTools;
   const { connection } = context.runtime;
   const { params, options, appServer, runAbortController } = connection;
   const state = {
@@ -142,12 +143,16 @@ export function createCodexAttemptTurnState(resources: CodexAttemptResources) {
     getActiveFinalizationHookCount: () => state.unsettledFinalizationHookCount,
     canReleaseAssistantCompletionIdle: () =>
       projectorRef.current?.hasLatestTerminalAssistantCandidateText() === true,
+    canReleaseNativeSubagentIdle: (timeout) =>
+      timeout.lastActivityReason === "notification:rawResponseItem/completed" &&
+      timeout.details?.lastNotificationItemType === "agent_message" &&
+      resourceState.nativeSubagentMonitor?.hasUnsettledChildren() === true,
     turnCompletionIdleTimeoutMs,
     turnAssistantCompletionIdleTimeoutMs,
     turnAttemptIdleTimeoutMs,
     turnTerminalIdleTimeoutMs,
     interruptTimeoutMs: CODEX_APP_SERVER_INTERRUPT_TIMEOUT_MS,
-    onInterruptTurn: (input) => interruptCodexTurnBestEffort(resourceState.client, input),
+    onInterruptTurn: (input) => interruptCodexTurnWithAck(resourceState.client, input),
     onTimeout: (timeout) => {
       state.timedOut = true;
       state.turnCompletionIdleTimedOut = true;
@@ -163,6 +168,12 @@ export function createCodexAttemptTurnState(resources: CodexAttemptResources) {
     onAbort: (reason) => runAbortController.abort(reason),
     onCompleted: () => {
       state.completed = true;
+    },
+    onNativeSubagentIdleRelease: () => {
+      // Inter-agent messages do not resume the parent model. Release this
+      // quiescent turn as a yield so completion delivery owns the next turn.
+      toolState.yieldDetected = true;
+      resourceState.nativeSubagentMonitor?.expeditePendingCompletionDelivery();
     },
     onResolveCompletion: () => state.resolveCompletion?.(),
     onRecordEvent: (name, fields) => trajectoryRecorder?.recordEvent(name, fields),

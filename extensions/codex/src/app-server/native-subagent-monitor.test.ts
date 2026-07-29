@@ -1353,6 +1353,42 @@ describe("CodexNativeSubagentMonitor", () => {
     }
   });
 
+  it("resets pending completion backoff when the parent safely yields", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = createClient();
+      const runtime = createRuntime();
+      runtime.deliverAgentHarnessTaskCompletion
+        .mockResolvedValueOnce({ delivered: false, path: "direct", error: "parent active" })
+        .mockResolvedValueOnce({ delivered: false, path: "direct", error: "parent active" })
+        .mockResolvedValueOnce({ delivered: true, path: "direct" });
+      const monitor = new CodexNativeSubagentMonitor(client as never, runtime, {
+        completionDeliveryRetryDelaysMs: [10, 100],
+      });
+      const registration = registerParent(monitor);
+      await notifyChildStarted(client);
+      expect(registration.hasUnsettledChildren()).toBe(true);
+      await client.notify(nativeCompletionNotification());
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(runtime.deliverAgentHarnessTaskCompletion).toHaveBeenCalledTimes(2);
+
+      registration.expeditePendingCompletionDelivery();
+      await vi.advanceTimersByTimeAsync(9);
+      expect(runtime.deliverAgentHarnessTaskCompletion).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(runtime.deliverAgentHarnessTaskCompletion).toHaveBeenCalledTimes(3);
+      expect(runtime.setDetachedTaskDeliveryStatusByRunId).toHaveBeenLastCalledWith(
+        expect.objectContaining({ deliveryStatus: "delivered" }),
+      );
+      expect(registration.hasUnsettledChildren()).toBe(false);
+      client.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps one terminal delivery owner across physical client replacement", async () => {
     vi.useFakeTimers();
     try {

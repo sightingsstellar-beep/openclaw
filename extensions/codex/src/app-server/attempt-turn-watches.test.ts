@@ -43,18 +43,23 @@ describe("Codex app-server attempt turn watches", () => {
       getActiveCompletionBlockerItemCount: () => activeCompletionBlockers,
       getActiveFinalizationHookCount: () => activeFinalizationHooks,
       canReleaseAssistantCompletionIdle: () => canReleaseAssistantCompletionIdle,
+      canReleaseNativeSubagentIdle: () => false,
       turnCompletionIdleTimeoutMs: 10,
       turnAssistantCompletionIdleTimeoutMs: 10,
       turnAttemptIdleTimeoutMs: 10,
       turnTerminalIdleTimeoutMs: 10,
       interruptTimeoutMs: 5,
-      onInterruptTurn: (input) => interrupts.push(input),
+      onInterruptTurn: async (input) => {
+        interrupts.push(input);
+        return true;
+      },
       onTimeout: (timeout) => timeouts.push(timeout),
       onMarkTimedOut: vi.fn(),
       onAbort: (reason) => abortController.abort(reason),
       onCompleted: () => {
         completed = true;
       },
+      onNativeSubagentIdleRelease: vi.fn(),
       onResolveCompletion: vi.fn(),
       onRecordEvent: (name, fields) => events.push({ name, fields }),
       onAttemptProgress: (reason) => progress.push(reason),
@@ -115,6 +120,151 @@ describe("Codex app-server attempt turn watches", () => {
         },
       },
     ]);
+    expect(harness.abortController.signal.reason).toBe("turn_completion_idle_timeout");
+  });
+
+  it("yields an unsettled native child at the exact former 60-second watchdog boundary", async () => {
+    const onNativeSubagentIdleRelease = vi.fn();
+    const onInterruptTurn = vi.fn(async () => true);
+    const harness = createController({
+      turnCompletionIdleTimeoutMs: 60_000,
+      canReleaseNativeSubagentIdle: () => true,
+      onInterruptTurn,
+      onNativeSubagentIdleRelease,
+    });
+
+    harness.controller.touchActivity("notification:rawResponseItem/completed", {
+      arm: true,
+      details: {
+        lastNotificationMethod: "rawResponseItem/completed",
+        lastNotificationItemType: "agent_message",
+      },
+    });
+    await vi.advanceTimersByTimeAsync(60_001);
+
+    expect(onInterruptTurn).toHaveBeenCalledWith({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      timeoutMs: 5,
+    });
+    expect(onNativeSubagentIdleRelease).toHaveBeenCalledTimes(1);
+    expect(harness.completed).toBe(true);
+    expect(harness.timeouts).toEqual([]);
+    expect(harness.abortController.signal.aborted).toBe(false);
+    expect(harness.events[0]?.name).toBe("turn.native_subagent_idle_release");
+  });
+
+  it("preserves native yield when turn completion races interrupt acknowledgment", async () => {
+    let completedDuringInterrupt = false;
+    const onNativeSubagentIdleRelease = vi.fn();
+    const harness = createController({
+      isCompleted: () => completedDuringInterrupt,
+      canReleaseNativeSubagentIdle: () => true,
+      onInterruptTurn: vi.fn(async () => {
+        completedDuringInterrupt = true;
+        return true;
+      }),
+      onNativeSubagentIdleRelease,
+    });
+
+    harness.controller.touchActivity("notification:rawResponseItem/completed", {
+      arm: true,
+      details: { lastNotificationItemType: "agent_message" },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(onNativeSubagentIdleRelease).toHaveBeenCalledTimes(1);
+    expect(harness.completed).toBe(true);
+    expect(harness.timeouts).toEqual([]);
+    expect(harness.abortController.signal.aborted).toBe(false);
+  });
+
+  it("keeps one native release owner while interrupt acknowledgment is pending", async () => {
+    let acknowledgeInterrupt: (acknowledged: boolean) => void = () => {};
+    const interruptAcknowledged = new Promise<boolean>((resolve) => {
+      acknowledgeInterrupt = resolve;
+    });
+    const onInterruptTurn = vi.fn(async () => await interruptAcknowledged);
+    const onNativeSubagentIdleRelease = vi.fn();
+    const harness = createController({
+      canReleaseNativeSubagentIdle: () => true,
+      onInterruptTurn,
+      onNativeSubagentIdleRelease,
+    });
+
+    harness.controller.touchActivity("notification:rawResponseItem/completed", {
+      arm: true,
+      details: { lastNotificationItemType: "agent_message" },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(onInterruptTurn).toHaveBeenCalledTimes(1);
+
+    harness.controller.touchActivity("notification:rawResponseItem/completed", {
+      arm: true,
+      attemptProgress: true,
+      details: { lastNotificationItemType: "agent_message" },
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    expect(onInterruptTurn).toHaveBeenCalledTimes(1);
+    expect(harness.timeouts).toEqual([]);
+
+    acknowledgeInterrupt(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onNativeSubagentIdleRelease).toHaveBeenCalledTimes(1);
+    expect(harness.timeouts).toEqual([]);
+    expect(harness.abortController.signal.aborted).toBe(false);
+  });
+
+  it("keeps the normal timeout path when native-child interrupt acknowledgment fails", async () => {
+    const onNativeSubagentIdleRelease = vi.fn();
+    const harness = createController({
+      canReleaseNativeSubagentIdle: () => true,
+      onInterruptTurn: vi.fn(async () => {
+        throw new Error("turn already unavailable");
+      }),
+      onNativeSubagentIdleRelease,
+    });
+
+    harness.controller.touchActivity("notification:rawResponseItem/completed", {
+      arm: true,
+      details: { lastNotificationItemType: "agent_message" },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(onNativeSubagentIdleRelease).not.toHaveBeenCalled();
+    expect(harness.completed).toBe(false);
+    expect(harness.timeouts).toMatchObject([
+      {
+        kind: "completion",
+        lastActivityReason: "notification:rawResponseItem/completed",
+      },
+    ]);
+    expect(harness.abortController.signal.reason).toBe("turn_completion_idle_timeout");
+    expect(harness.events.map((event) => event.name)).toEqual([
+      "turn.native_subagent_idle_interrupt_failed",
+      "turn.completion_idle_timeout",
+    ]);
+  });
+
+  it("keeps the normal timeout path when no active turn can acknowledge release", async () => {
+    const onInterruptTurn = vi.fn(async () => true);
+    const onNativeSubagentIdleRelease = vi.fn();
+    const harness = createController({
+      getTurnId: () => undefined,
+      canReleaseNativeSubagentIdle: () => true,
+      onInterruptTurn,
+      onNativeSubagentIdleRelease,
+    });
+
+    harness.controller.touchActivity("notification:rawResponseItem/completed", {
+      arm: true,
+      details: { lastNotificationItemType: "agent_message" },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(onInterruptTurn).not.toHaveBeenCalled();
+    expect(onNativeSubagentIdleRelease).not.toHaveBeenCalled();
+    expect(harness.timeouts).toHaveLength(1);
     expect(harness.abortController.signal.reason).toBe("turn_completion_idle_timeout");
   });
 
