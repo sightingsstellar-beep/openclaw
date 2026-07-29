@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   annotateInterSessionPromptText,
+  isAgentHarnessTaskCompletionInputProvenance,
   isAgentMediatedCompletionSourceTool,
   shouldPreserveUserFacingSessionStateForInputProvenance,
   stripInterSessionPromptPrefixForDisplay,
@@ -95,6 +96,29 @@ describe("isAgentMediatedCompletionSourceTool", () => {
       expect(isAgentMediatedCompletionSourceTool(sourceTool)).toBe(false);
     },
   );
+});
+
+describe("isAgentHarnessTaskCompletionInputProvenance", () => {
+  it("matches only inter-session native harness completions", () => {
+    expect(
+      isAgentHarnessTaskCompletionInputProvenance({
+        kind: "inter_session",
+        sourceTool: "AGENT_HARNESS_TASK",
+      }),
+    ).toBe(true);
+    expect(
+      isAgentHarnessTaskCompletionInputProvenance({
+        kind: "inter_session",
+        sourceTool: "image_generate",
+      }),
+    ).toBe(false);
+    expect(
+      isAgentHarnessTaskCompletionInputProvenance({
+        kind: "external_user",
+        sourceTool: "agent_harness_task",
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("shouldPreserveUserFacingSessionStateForInputProvenance", () => {

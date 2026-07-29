@@ -4,7 +4,9 @@ import { resetCommandQueueStateForTest } from "../../../process/command-queue.te
 import { MAIN_SESSION_RESTART_RECOVERY_SOURCE_TOOL } from "../../../sessions/input-provenance.js";
 import {
   EMBEDDED_RUN_LANE_HEARTBEAT_MS,
+  resolveEmbeddedRunGlobalQueuePriority,
   resolveEmbeddedRunSessionQueuePriority,
+  shouldDeferAgentHarnessCompletionForGlobalLane,
   withEmbeddedRunLaneProgressHeartbeat,
 } from "./lane-runtime.js";
 
@@ -49,6 +51,56 @@ describe("embedded run lane priority", () => {
     await Promise.all([blocker, foreground, restartRecovery]);
 
     expect(order).toEqual(["foreground-user", "restart-recovery"]);
+  });
+
+  it("orders native harness completions behind foreground session work", () => {
+    expect(
+      resolveEmbeddedRunSessionQueuePriority("user", {
+        kind: "inter_session",
+        sourceTool: "agent_harness_task",
+      }),
+    ).toBe("background");
+    expect(
+      resolveEmbeddedRunSessionQueuePriority("user", {
+        kind: "external_user",
+        sourceTool: "agent_harness_task",
+      }),
+    ).toBe("foreground");
+  });
+
+  it("applies background ordering only at session admission", () => {
+    expect(resolveEmbeddedRunGlobalQueuePriority("background")).toBe("normal");
+    expect(resolveEmbeddedRunGlobalQueuePriority("foreground")).toBe("foreground");
+    expect(resolveEmbeddedRunGlobalQueuePriority("normal")).toBe("normal");
+  });
+
+  it("defers native harness completions before a busy nested global lane", () => {
+    const busySnapshot = {
+      lane: "main",
+      queuedCount: 0,
+      activeCount: 1,
+      maxConcurrent: 1,
+      draining: false,
+      generation: 0,
+    };
+    expect(
+      shouldDeferAgentHarnessCompletionForGlobalLane(
+        { kind: "inter_session", sourceTool: "agent_harness_task" },
+        busySnapshot,
+      ),
+    ).toBe(true);
+    expect(
+      shouldDeferAgentHarnessCompletionForGlobalLane(
+        { kind: "inter_session", sourceTool: "image_generate" },
+        busySnapshot,
+      ),
+    ).toBe(false);
+    expect(
+      shouldDeferAgentHarnessCompletionForGlobalLane(
+        { kind: "inter_session", sourceTool: "agent_harness_task" },
+        { ...busySnapshot, activeCount: 0 },
+      ),
+    ).toBe(false);
   });
 });
 

@@ -125,7 +125,11 @@ type ActiveTaskWaiter = {
 };
 
 function isExpectedNonErrorLaneFailure(err: unknown): boolean {
-  return err instanceof Error && err.name === "LiveSessionModelSwitchError";
+  return (
+    err instanceof Error &&
+    (err.name === "LiveSessionModelSwitchError" ||
+      err.name === "EmbeddedBackgroundLaneAdmissionDeferredError")
+  );
 }
 
 function isQuietProbeLane(lane: string): boolean {
