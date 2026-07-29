@@ -2,8 +2,12 @@ import {
   addTimerTimeoutGraceMs,
   MAX_TIMER_TIMEOUT_MS,
 } from "@openclaw/normalization-core/number-coercion";
+import type { CommandLaneSnapshot } from "../../../process/command-queue.js";
 import type { CommandQueueEnqueueOptions } from "../../../process/command-queue.types.js";
-import { isMainSessionRestartRecoveryInputProvenance } from "../../../sessions/input-provenance.js";
+import {
+  isAgentHarnessTaskCompletionInputProvenance,
+  isMainSessionRestartRecoveryInputProvenance,
+} from "../../../sessions/input-provenance.js";
 import { DEFAULT_AGENT_TIMEOUT_MS } from "../../timeout.js";
 import type { RunEmbeddedAgentParams } from "./params.js";
 
@@ -52,7 +56,10 @@ export function resolveEmbeddedRunSessionQueuePriority(
   trigger: RunEmbeddedAgentParams["trigger"],
   inputProvenance?: RunEmbeddedAgentParams["inputProvenance"],
 ): CommandQueueEnqueueOptions["priority"] {
-  if (isMainSessionRestartRecoveryInputProvenance(inputProvenance)) {
+  if (
+    isMainSessionRestartRecoveryInputProvenance(inputProvenance) ||
+    isAgentHarnessTaskCompletionInputProvenance(inputProvenance)
+  ) {
     return "background";
   }
   switch (trigger) {
@@ -67,4 +74,25 @@ export function resolveEmbeddedRunSessionQueuePriority(
     default:
       return "normal";
   }
+}
+
+export function resolveEmbeddedRunGlobalQueuePriority(
+  sessionPriority: CommandQueueEnqueueOptions["priority"],
+): CommandQueueEnqueueOptions["priority"] {
+  // Background ordering belongs at session admission. Keeping the same low
+  // priority on the nested global queue can hold a session lane indefinitely.
+  return sessionPriority === "background" ? "normal" : sessionPriority;
+}
+
+export function shouldDeferAgentHarnessCompletionForGlobalLane(
+  inputProvenance: RunEmbeddedAgentParams["inputProvenance"],
+  snapshot: CommandLaneSnapshot,
+): boolean {
+  return (
+    isAgentHarnessTaskCompletionInputProvenance(inputProvenance) &&
+    (snapshot.draining ||
+      snapshot.maxConcurrent <= 0 ||
+      snapshot.queuedCount > 0 ||
+      snapshot.activeCount >= snapshot.maxConcurrent)
+  );
 }

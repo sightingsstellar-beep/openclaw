@@ -11,8 +11,10 @@ import { withSessionPlacementTurnAdmission } from "../../session-placement-admis
 import type { EmbeddedAgentRunResult } from "../types.js";
 import {
   EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS,
+  resolveEmbeddedRunGlobalQueuePriority,
   resolveEmbeddedRunLaneTimeoutMs,
   resolveEmbeddedRunSessionQueuePriority,
+  shouldDeferAgentHarnessCompletionForGlobalLane,
   withEmbeddedRunLaneTimeout,
 } from "./lane-runtime.js";
 import type { RunEmbeddedAgentParams } from "./params.js";
@@ -36,6 +38,7 @@ export function createEmbeddedRunLaneController<TParams extends LaneParams>(opti
     initialParams.trigger,
     initialParams.inputProvenance,
   );
+  const globalQueuePriority = resolveEmbeddedRunGlobalQueuePriority(sessionQueuePriority);
   const laneTaskTimeoutMs = resolveEmbeddedRunLaneTimeoutMs(initialParams.timeoutMs);
   const laneTaskAbortController = new AbortController();
   const laneTaskReleaseController = new AbortController();
@@ -102,12 +105,21 @@ export function createEmbeddedRunLaneController<TParams extends LaneParams>(opti
     task: () => Promise<EmbeddedAgentRunResult>,
     opts?: CommandQueueEnqueueOptions,
   ) => {
+    const currentParams = options.getParams();
+    if (
+      shouldDeferAgentHarnessCompletionForGlobalLane(
+        currentParams.inputProvenance,
+        getCommandLaneSnapshot(options.globalLane),
+      )
+    ) {
+      throw new EmbeddedBackgroundLaneAdmissionDeferredError(options.globalLane);
+    }
     // Global-lane admission is healthy waiting, not run execution. Keep reply
     // staleness and stuck recovery fenced until this queue grants capacity.
-    options.getParams().replyOperation?.markWaitingForGlobalLane();
+    currentParams.replyOperation?.markWaitingForGlobalLane();
     const globalOpts: CommandQueueEnqueueOptions = {
       ...opts,
-      priority: sessionQueuePriority,
+      priority: globalQueuePriority,
     };
     const taskWithCurrentLifecycle = async () => {
       let params = options.getParams();
@@ -159,9 +171,11 @@ export function createEmbeddedRunLaneController<TParams extends LaneParams>(opti
         ),
       );
     };
-    const params = options.getParams();
-    if (params.enqueue) {
-      return params.enqueue(taskWithCurrentLifecycle, withLaneTimeout(withRunLaneWait(globalOpts)));
+    if (currentParams.enqueue) {
+      return currentParams.enqueue(
+        taskWithCurrentLifecycle,
+        withLaneTimeout(withRunLaneWait(globalOpts)),
+      );
     }
     noteLaneWaitIfBusy(options.globalLane);
     return enqueueCommandInLane(
@@ -196,4 +210,11 @@ export function createEmbeddedRunLaneController<TParams extends LaneParams>(opti
     noteLaneTaskProgress,
     throwIfAborted,
   };
+}
+
+class EmbeddedBackgroundLaneAdmissionDeferredError extends Error {
+  constructor(lane: string) {
+    super(`Background agent run deferred while global lane "${lane}" is busy`);
+    this.name = "EmbeddedBackgroundLaneAdmissionDeferredError";
+  }
 }

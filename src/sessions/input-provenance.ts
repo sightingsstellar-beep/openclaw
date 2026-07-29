@@ -94,6 +94,14 @@ export function isAgentMediatedCompletionSourceTool(value: unknown): boolean {
   return sourceTool ? AGENT_MEDIATED_COMPLETION_SOURCE_TOOL_SET.has(sourceTool) : false;
 }
 
+export function isAgentHarnessTaskCompletionInputProvenance(value: unknown): boolean {
+  const provenance = normalizeInputProvenance(value);
+  return (
+    provenance?.kind === "inter_session" &&
+    normalizeOptionalString(provenance.sourceTool)?.toLowerCase() === "agent_harness_task"
+  );
+}
+
 export function isCompletionReportInputProvenance(value: unknown): boolean {
   const provenance = normalizeInputProvenance(value);
   if (provenance?.kind !== "inter_session") {
