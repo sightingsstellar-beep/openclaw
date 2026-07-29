@@ -5865,6 +5865,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Minimal backend plugin
   - H2: Config shape
   - H2: Advanced backend hooks
+  - H3: parseJsonlEvent: provider-specific JSONL streams
   - H3: ownsNativeCompaction: opting out of OpenClaw compaction
   - H2: MCP tool bridge
   - H2: Selecting the backend
@@ -7639,6 +7640,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H3: Terminal outcome classification
   - H3: Agent-end side effects
   - H3: User input and tool surfaces
+  - H3: Native MCP inventory
   - H3: Native Codex harness mode
   - H2: Runtime strictness
   - H2: Native sessions and transcript mirror
@@ -10358,6 +10360,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
 - Route: /tools/mcp
 - Headings:
   - H2: Add a server from Settings
+  - H2: Add a server from the composer
   - H2: Add a server from the CLI
   - H2: Configure a server directly
   - H2: Troubleshooting
@@ -10917,6 +10920,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Activity tab
   - H2: Operator terminal
   - H2: Browser panel
+  - H2: Composer capability menu
   - H2: Chat behavior
   - H2: Connection loss and reconnect
   - H2: PWA install and web push

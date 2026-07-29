@@ -208,7 +208,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +2: shared ingress error factory through channel-outbound and channel-message.
       // +2: shared ingress retention defaults through channel-outbound and channel-message.
       // +4: sole-agent resolver functions, typed selection error, and context type.
-      4777,
+      // +1: collision-safe MCP server-name assignment for native harness catalogs.
+      4778,
       env,
     ),
     publicFunctionExports: readPluginSdkSurfaceBudgetEnv(
@@ -246,7 +247,8 @@ export function readPluginSdkSurfaceBudgets(env = process.env) {
       // +1: inbound media-fact metadata projection for plugin-owned channel ingestion.
       // +2: shared ingress error factory through channel-outbound and channel-message.
       // +2: throwing and non-throwing sole-agent resolvers.
-      2883,
+      // +1: collision-safe MCP server-name assignment for native harness catalogs.
+      2884,
       env,
     ),
     publicDeprecatedExports: readPluginSdkSurfaceBudgetEnv(
