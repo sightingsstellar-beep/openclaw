@@ -5,6 +5,7 @@ import {
   loadRunOverflowCompactionHarness,
   mockedRunEmbeddedAttempt,
   overflowBaseRunParams,
+  overflowHarnessGlobalLane,
   resetRunOverflowCompactionHarnessMocks,
   warmRunOverflowCompactionHarness,
 } from "./run.overflow-compaction.harness.js";
@@ -21,19 +22,21 @@ describe("runEmbeddedAgent lane priority", () => {
     resetRunOverflowCompactionHarnessMocks();
   });
 
-  it("releases the session lane when a native completion finds the global lane busy", async () => {
+  it("releases the session lane when a native completion finds the global lane busy, then retries", async () => {
     let releaseGlobal: () => void = () => {};
     const globalBlocker = enqueueCommandInLane(
-      "main",
+      overflowHarnessGlobalLane,
       () =>
         new Promise<void>((resolve) => {
           releaseGlobal = resolve;
         }),
     );
-    await vi.waitFor(() => expect(getCommandLaneSnapshot("main").activeCount).toBe(1));
+    await vi.waitFor(() =>
+      expect(getCommandLaneSnapshot(overflowHarnessGlobalLane).activeCount).toBe(1),
+    );
 
     try {
-      const background = runEmbeddedAgent({
+      const backgroundParams = {
         ...overflowBaseRunParams,
         runId: "run-background-completion",
         trigger: "user",
@@ -41,7 +44,8 @@ describe("runEmbeddedAgent lane priority", () => {
           kind: "inter_session",
           sourceTool: "agent_harness_task",
         },
-      });
+      } satisfies Parameters<typeof runEmbeddedAgent>[0];
+      const background = runEmbeddedAgent(backgroundParams);
 
       await expect(background).rejects.toMatchObject({
         name: "EmbeddedBackgroundLaneAdmissionDeferredError",
@@ -63,7 +67,10 @@ describe("runEmbeddedAgent lane priority", () => {
       await globalBlocker;
       await foreground;
 
-      expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(1);
+      mockedRunEmbeddedAttempt.mockResolvedValueOnce(makeAttemptResult({ promptError: null }));
+      await expect(runEmbeddedAgent(backgroundParams)).resolves.toBeDefined();
+
+      expect(mockedRunEmbeddedAttempt).toHaveBeenCalledTimes(2);
     } finally {
       releaseGlobal();
       await globalBlocker;
@@ -73,13 +80,15 @@ describe("runEmbeddedAgent lane priority", () => {
   it("defers a native completion before invoking an injected global enqueuer", async () => {
     let releaseGlobal: () => void = () => {};
     const globalBlocker = enqueueCommandInLane(
-      "main",
+      overflowHarnessGlobalLane,
       () =>
         new Promise<void>((resolve) => {
           releaseGlobal = resolve;
         }),
     );
-    await vi.waitFor(() => expect(getCommandLaneSnapshot("main").activeCount).toBe(1));
+    await vi.waitFor(() =>
+      expect(getCommandLaneSnapshot(overflowHarnessGlobalLane).activeCount).toBe(1),
+    );
     const enqueue = vi.fn(async <T>(task: () => Promise<T> | T) => await task());
 
     try {

@@ -424,6 +424,7 @@ export const overflowBaseRunParams = {
   timeoutMs: 30000,
   runId: "run-1",
 } as const;
+export const overflowHarnessGlobalLane = "global-lane";
 
 /** Reset every mocked runner dependency to the default successful no-op state. */
 export function resetRunOverflowCompactionHarnessMocks(): void {
@@ -974,7 +975,7 @@ export async function loadRunOverflowCompactionHarness(): Promise<{
   vi.doMock("./lanes.js", () => ({
     resolveSessionLane: vi.fn((key: string) => `session:${key}`),
     resolveEmbeddedSessionLane: vi.fn((key: string) => `session:${key}`),
-    resolveGlobalLane: vi.fn(() => "global-lane"),
+    resolveGlobalLane: vi.fn(() => overflowHarnessGlobalLane),
   }));
 
   vi.doMock("./logger.js", () => ({
