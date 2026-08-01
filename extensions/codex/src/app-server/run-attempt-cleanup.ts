@@ -31,7 +31,7 @@ export async function cleanupCodexAttempt(
     state: resourceState,
     trajectoryRecorder,
     releaseCurrentRoute,
-    releaseSharedClientLeaseAndRetireOneShotClient,
+    releaseSharedClientLeaseAndMaybeRetireClient,
     releaseSandboxExecEnvironment,
   } = resources;
   const { connection } = prompt.context.runtime;
@@ -123,8 +123,16 @@ export async function cleanupCodexAttempt(
           threadId: resourceState.thread.threadId,
         })
       : true;
-  // Only explicitly retained live threads may skip the next thread/resume.
-  if (!state.timedOut && !retainLiveThread) {
+  const retireForPendingNativeSubagents =
+    !retainLiveThread &&
+    bindingReleased &&
+    resourceState.nativeSubagentMonitor?.hasPendingChildren() === true;
+  // A late native completion is published on the parent subscription. When a
+  // child still owns that path, detach the physical client from future reuse
+  // and let the monitor's lease close it after the envelope or bounded timeout.
+  // Explicit live-thread ownership and pending native children may skip the
+  // next thread/resume; the latter always retire this physical client below.
+  if (!state.timedOut && !retainLiveThread && !retireForPendingNativeSubagents) {
     // Clear first: if a newer owner won the binding, its live subscription must remain intact.
     if (bindingReleased) {
       const released = await unsubscribeCodexThreadBestEffort(resourceState.client, {
@@ -140,7 +148,9 @@ export async function cleanupCodexAttempt(
   userInputBridgeRef.current?.cancelPending();
   turnWatches.clearAllTimers();
   releaseCurrentRoute();
-  await releaseSharedClientLeaseAndRetireOneShotClient();
+  await releaseSharedClientLeaseAndMaybeRetireClient({
+    forceRetire: retireForPendingNativeSubagents,
+  });
   if (resourceState.nativeHookRelay) {
     if (state.shouldDelayNativeHookRelayUnregister) {
       // Native hook subprocesses can finish shortly after turn completion.

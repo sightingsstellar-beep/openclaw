@@ -8,6 +8,7 @@ import { CodexAppServerClient } from "./client.js";
 import type { CodexAppServerStartOptions } from "./config.js";
 import { acquireCodexNativeConfigFence } from "./native-config-fence.js";
 import { codexNativeSubagentMonitorRuntime } from "./native-subagent-monitor.js";
+import { isJsonObject } from "./protocol.js";
 import { createClientHarness } from "./test-support.js";
 import { CODEX_APP_SERVER_VERSION } from "./version.js";
 
@@ -93,6 +94,7 @@ let clearSharedCodexAppServerClientIfCurrentAndWait: typeof import("./shared-cli
 let createIsolatedCodexAppServerClient: typeof import("./shared-client.js").createIsolatedCodexAppServerClient;
 let getLeasedSharedCodexAppServerClient: typeof import("./shared-client.js").getLeasedSharedCodexAppServerClient;
 let isCodexAppServerStartSelectionChangedError: typeof import("./shared-client.js").isCodexAppServerStartSelectionChangedError;
+let retainLiveSharedCodexAppServerClient: typeof import("./shared-client.js").retainLiveSharedCodexAppServerClient;
 let retainSharedCodexAppServerClientIfCurrent: typeof import("./shared-client.js").retainSharedCodexAppServerClientIfCurrent;
 let retainSharedCodexAppServerClientByInstanceId: typeof import("./shared-client.js").retainSharedCodexAppServerClientByInstanceId;
 let releaseLeasedSharedCodexAppServerClient: typeof import("./shared-client.js").releaseLeasedSharedCodexAppServerClient;
@@ -196,6 +198,7 @@ describe("shared Codex app-server client", () => {
       createIsolatedCodexAppServerClient,
       getLeasedSharedCodexAppServerClient,
       isCodexAppServerStartSelectionChangedError,
+      retainLiveSharedCodexAppServerClient,
       retainSharedCodexAppServerClientIfCurrent,
       retainSharedCodexAppServerClientByInstanceId,
       releaseLeasedSharedCodexAppServerClient,
@@ -1687,6 +1690,37 @@ describe("shared Codex app-server client", () => {
     expect(second.process.stdin.destroyed).toBe(true);
   });
 
+  it("lets a staggered sibling child retain a gracefully retired shared client", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+
+    const firstLease = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    const secondLease = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.146.0 (Linux; test)");
+    const firstClient = await firstLease;
+    const secondClient = await secondLease;
+    expect(secondClient).toBe(firstClient);
+
+    const releaseFirstChild = retainLiveSharedCodexAppServerClient(firstClient);
+    expect(releaseFirstChild).toBeTypeOf("function");
+    expect(retireSharedCodexAppServerClientIfCurrent(firstClient)).toEqual({
+      activeLeases: 3,
+      closed: false,
+    });
+    expect(retainSharedCodexAppServerClientIfCurrent(firstClient)).toBeUndefined();
+
+    expect(releaseLeasedSharedCodexAppServerClient(firstClient)).toBe(true);
+    releaseFirstChild?.();
+    const releaseSecondChild = retainLiveSharedCodexAppServerClient(secondClient);
+    expect(releaseSecondChild).toBeTypeOf("function");
+    expect(releaseLeasedSharedCodexAppServerClient(secondClient)).toBe(true);
+    expect(harness.process.stdin.destroyed).toBe(false);
+
+    releaseSecondChild?.();
+    expect(harness.process.stdin.destroyed).toBe(true);
+    expect(retainLiveSharedCodexAppServerClient(firstClient)).toBeUndefined();
+  });
+
   it("keeps a retired one-shot client alive until native subagent completion", async () => {
     const harness = createClientHarness();
     vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
@@ -1702,7 +1736,16 @@ describe("shared Codex app-server client", () => {
       listTaskRecords: vi.fn(() => []),
       setDetachedTaskDeliveryStatusByRunId: vi.fn(() => []),
     };
-    const retainClient = vi.fn(() => retainSharedCodexAppServerClientIfCurrent(client));
+    const releaseRetention = vi.fn();
+    const retainClient = vi.fn(() => {
+      const release = retainLiveSharedCodexAppServerClient(client);
+      return release
+        ? () => {
+            releaseRetention();
+            release();
+          }
+        : undefined;
+    });
     const monitor = new codexNativeSubagentMonitorRuntime.Monitor(
       client,
       {
@@ -1711,11 +1754,18 @@ describe("shared Codex app-server client", () => {
       } as never,
       { retainClient },
     );
-    monitor.registerParent({
+    const parentRegistration = monitor.registerParent({
       parentThreadId: "parent-thread",
       requesterSessionKey: "agent:main:main",
       taskRuntimeScope: {} as never,
       agentId: "main",
+    });
+    let childTurnObserved = false;
+    client.addNotificationHandler((notification) => {
+      const params = isJsonObject(notification.params) ? notification.params : undefined;
+      if (notification.method === "turn/completed" && params?.threadId === "child-thread") {
+        childTurnObserved = true;
+      }
     });
 
     harness.send({
@@ -1738,7 +1788,11 @@ describe("shared Codex app-server client", () => {
       },
     });
     await vi.waitFor(() => expect(retainClient).toHaveBeenCalledTimes(1));
+    expect(parentRegistration.hasPendingChildren()).toBe(true);
 
+    // Production cleanup unregisters the foreground route before releasing its
+    // ordinary lease. The detached child retain must remain the only owner.
+    parentRegistration.unregister();
     expect(releaseLeasedSharedCodexAppServerClient(client)).toBe(true);
     expect(retireSharedCodexAppServerClientIfCurrent(client)).toEqual({
       activeLeases: 1,
@@ -1774,10 +1828,51 @@ describe("shared Codex app-server client", () => {
       },
     });
 
-    await vi.waitFor(() => expect(deliverCompletion).toHaveBeenCalledTimes(1));
-    expect(deliverCompletion).toHaveBeenCalledWith(
-      expect.objectContaining({ childSessionId: "child-thread", result: "child final result" }),
+    await vi.waitFor(() => expect(childTurnObserved).toBe(true));
+    expect(deliverCompletion).not.toHaveBeenCalled();
+    expect(taskRuntime.finalizeTaskRunByRunId).not.toHaveBeenCalled();
+    expect(releaseRetention).not.toHaveBeenCalled();
+    expect(harness.process.stdin.destroyed).toBe(false);
+
+    const content =
+      '<subagent_notification>{"agent_path":"child-thread","status":' +
+      '{"completed":"child final result"}}</subagent_notification>';
+    harness.send({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "parent-thread",
+        item: {
+          type: "message",
+          role: "assistant",
+          phase: "commentary",
+          content: [
+            {
+              type: "output_text",
+              text: JSON.stringify({
+                author: "child-thread",
+                recipient: "/root",
+                other_recipients: [],
+                content,
+                trigger_turn: false,
+              }),
+            },
+          ],
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(taskRuntime.finalizeTaskRunByRunId).toHaveBeenCalledTimes(1));
+    expect(parentRegistration.hasPendingChildren()).toBe(false);
+    expect(taskRuntime.finalizeTaskRunByRunId).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: "codex-thread:child-thread",
+        terminalSummary: "child final result",
+        suppressDelivery: true,
+        detail: expect.objectContaining({ disposition: "native_parent" }),
+      }),
     );
+    expect(deliverCompletion).not.toHaveBeenCalled();
+    expect(releaseRetention).toHaveBeenCalledTimes(1);
     expect(harness.process.stdin.destroyed).toBe(true);
   });
 

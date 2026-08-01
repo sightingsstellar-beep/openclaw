@@ -1160,6 +1160,27 @@ export function retainSharedCodexAppServerClientIfCurrent(
   return undefined;
 }
 
+/** Retains a live shared client even after graceful retirement detached it from future reuse. */
+export function retainLiveSharedCodexAppServerClient(
+  client: CodexAppServerClient | undefined,
+): (() => void) | undefined {
+  if (!client || client.getCloseError()) {
+    return undefined;
+  }
+  const currentRelease = retainSharedCodexAppServerClientIfCurrent(client);
+  if (currentRelease) {
+    return currentRelease;
+  }
+  const retiredEntry = getSharedCodexAppServerClientState().entriesByClient.get(client);
+  if (retiredEntry?.client !== client || retiredEntry.closeError) {
+    return undefined;
+  }
+  // Graceful retirement detaches the entry from future acquisitions while
+  // existing sibling turns continue. A child spawned by one of those turns
+  // must still be able to extend the retired process's lifetime.
+  return retainSharedClientEntry(retiredEntry);
+}
+
 /** Retains the live shared client whose initialized instance id matches a thread binding. */
 export function retainSharedCodexAppServerClientByInstanceId(
   clientId: string | undefined,

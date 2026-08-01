@@ -316,6 +316,7 @@ export function getMockRuntimeIdentity() {
 
 export function mockClientRuntimeMethods() {
   return {
+    getCloseError: () => undefined,
     getInstanceId: () => "test-client-1",
     getRuntimeIdentity: getMockRuntimeIdentity,
     getServerVersion: getMockServerVersion,

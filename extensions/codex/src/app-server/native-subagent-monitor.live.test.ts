@@ -1,5 +1,5 @@
-// Live proof for Codex native subagent monitoring against a real app-server:
-// spawned-child lineage, detached completion delivery, and history recovery.
+// Live proof for the Codex-native completion boundary against a real app-server:
+// the parent mailbox receives the result while OpenClaw records silent telemetry only.
 import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -12,7 +12,6 @@ import { describe, expect, it } from "vitest";
 import type { CodexAppServerClient } from "./client.js";
 import { resolveCodexAppServerRuntimeOptions } from "./config.js";
 import { codexNativeSubagentMonitorRuntime } from "./native-subagent-monitor.js";
-import { codexNativeSubagentRunId } from "./native-subagent-task-mirror.js";
 import type { JsonObject } from "./protocol.js";
 import { isJsonObject } from "./protocol.js";
 import { createIsolatedCodexAppServerClient } from "./shared-client.js";
@@ -23,34 +22,64 @@ const LIVE =
   process.env.OPENCLAW_LIVE_TEST === "1" && process.env.OPENCLAW_LIVE_CODEX_NATIVE_SUBAGENT === "1";
 const describeLive = LIVE ? describe : describe.skip;
 
-type RecordedDelivery = {
-  childSessionId: string;
-  status: string;
-  result: string;
+type FinalizedTelemetry = {
+  runId?: string;
+  status?: string;
+  terminalSummary?: string;
+  suppressDelivery?: boolean;
+  detail?: JsonObject;
 };
 
-function createDeliveryRecorder(taskRecords: AgentHarnessTaskRecord[] = []) {
-  const deliveries: RecordedDelivery[] = [];
+function createTelemetryRecorder(options: { onFinalize?: () => void } = {}) {
+  const created: Record<string, unknown>[] = [];
+  const finalized: FinalizedTelemetry[] = [];
+  const deliveryAttempts: unknown[] = [];
+  let listCalls = 0;
   const taskRuntime = {
-    tryCreateRunningTaskRun: (params: { runId?: string }) =>
-      ({ runId: params.runId }) as AgentHarnessTaskRecord,
+    tryCreateRunningTaskRun: (params: Record<string, unknown>) => {
+      created.push(params);
+      return {
+        taskId: String(params.sourceId ?? params.runId),
+        runtime: "subagent",
+        taskKind: "codex-native",
+        requesterSessionKey: "live:native-only",
+        ownerKey: "live:native-only",
+        scopeKind: "session",
+        runId: params.runId,
+        task: typeof params.task === "string" ? params.task : "Codex native subagent",
+        status: "running",
+        deliveryStatus: params.deliveryStatus ?? "not_applicable",
+        notifyPolicy: params.notifyPolicy ?? "silent",
+        createdAt: Number(params.startedAt ?? Date.now()),
+      } as AgentHarnessTaskRecord;
+    },
     recordTaskRunProgressByRunId: () => [],
-    finalizeTaskRunByRunId: () => [],
-    listTaskRecords: () => taskRecords,
-    setDetachedTaskDeliveryStatusByRunId: () => [],
+    finalizeTaskRunByRunId: (params: FinalizedTelemetry) => {
+      finalized.push(params);
+      options.onFinalize?.();
+      return [];
+    },
+    // Deliberately outside the monitor contract. These counters prove the
+    // monitor neither scans old rows nor calls the retired delivery path.
+    listTaskRecords: () => {
+      listCalls += 1;
+      return [];
+    },
+    deliverAgentHarnessTaskCompletion: (params: unknown) => {
+      deliveryAttempts.push(params);
+      return Promise.resolve({ delivered: true, path: "steered" as const });
+    },
   };
   return {
-    deliveries,
+    created,
+    finalized,
+    deliveryAttempts,
+    get listCalls() {
+      return listCalls;
+    },
     runtime: {
       createAgentHarnessTaskRuntime: () => taskRuntime,
-      deliverAgentHarnessTaskCompletion: async (params: RecordedDelivery) => {
-        deliveries.push({
-          childSessionId: params.childSessionId,
-          status: params.status,
-          result: params.result,
-        });
-        return { delivered: true, path: "steered" as const };
-      },
+      deliverAgentHarnessTaskCompletion: taskRuntime.deliverAgentHarnessTaskCompletion,
     } as never,
   };
 }
@@ -68,7 +97,7 @@ async function waitFor<T>(probe: () => T | undefined, timeoutMs: number, what: s
 }
 
 describeLive("codex native subagent monitor live", () => {
-  it("delivers spawned subagent results live and recovers them from history", async () => {
+  it("observes a late native result without synthesizing a recovery turn", async () => {
     const apiKey = process.env.OPENAI_API_KEY?.trim();
     if (!apiKey) {
       throw new Error("OPENAI_API_KEY is required for this live test");
@@ -100,14 +129,14 @@ describeLive("codex native subagent monitor live", () => {
         );
 
         let parentThreadId = "";
-        let parentTurnCompleted = false;
+        let parentTurnCompletions = 0;
         client.addNotificationHandler((notification) => {
           if (notification.method !== "turn/completed") {
             return;
           }
           const params = isJsonObject(notification.params) ? notification.params : undefined;
           if (params?.threadId === parentThreadId) {
-            parentTurnCompleted = true;
+            parentTurnCompletions += 1;
           }
         });
 
@@ -126,21 +155,22 @@ describeLive("codex native subagent monitor live", () => {
         );
         parentThreadId = started.thread.id;
 
-        const streamed = createDeliveryRecorder();
-        const monitor = new CodexNativeSubagentMonitor(client as never, streamed.runtime);
-        monitor.registerParent({
+        const lifecycleEvents: string[] = [];
+        const telemetry = createTelemetryRecorder({
+          onFinalize: () => lifecycleEvents.push("finalize"),
+        });
+        const monitor = new CodexNativeSubagentMonitor(client as never, telemetry.runtime, {
+          retainClient: () => () => lifecycleEvents.push("release"),
+        });
+        const parentRegistration = monitor.registerParent({
           parentThreadId,
-          requesterSessionKey: "live:streamed",
+          requesterSessionKey: "live:native-only",
           taskRuntimeScope: {
-            requesterSessionKey: "live:streamed",
+            requesterSessionKey: "live:native-only",
           } as AgentHarnessTaskRuntimeScope,
           agentId: "live",
         });
 
-        // Detached-child scenario: the parent replies immediately while the
-        // child still owes its own model round (plus a sleep for margin), so
-        // the parent turn completes first, like an OpenClaw run cleaning up
-        // after yield while its native subagent is still working.
         await client.request(
           "turn/start",
           {
@@ -156,80 +186,56 @@ describeLive("codex native subagent monitor live", () => {
         );
 
         await waitFor(
-          () => (parentTurnCompleted ? true : undefined),
+          () => (parentTurnCompletions === 1 ? true : undefined),
           300_000,
-          "parent turn completion",
+          "initial parent turn completion",
         );
-        // The child is still sleeping when the parent turn ends; delivery after
-        // this point proves the detached path, not same-turn streaming.
-        expect(streamed.deliveries).toHaveLength(0);
+        parentRegistration.unregister();
+        expect(telemetry.deliveryAttempts).toHaveLength(0);
 
-        const delivery = await waitFor(
-          () => streamed.deliveries[0],
+        const finalization = await waitFor(
+          () => telemetry.finalized.find((entry) => entry.terminalSummary?.includes("BANANA42")),
           420_000,
-          "detached child completion delivery",
+          "native-parent telemetry finalization",
         );
-        expect(delivery.status).toBe("succeeded");
-        expect(delivery.result).toMatch(/BANANA42/iu);
-        const childThreadId = delivery.childSessionId;
+        expect(finalization).toMatchObject({
+          status: "succeeded",
+          suppressDelivery: true,
+          detail: { disposition: "native_parent", parentThreadId },
+        });
+        expect(telemetry.deliveryAttempts).toHaveLength(0);
+        expect(parentTurnCompletions).toBe(1);
+        expect(lifecycleEvents).toEqual(["finalize", "release"]);
 
-        // Canonical protocol shape: lineage plus terminal turn from history.
+        const childThreadId = finalization.detail?.childThreadId;
+        if (typeof childThreadId !== "string") {
+          throw new Error("native-parent telemetry did not include a child thread id");
+        }
         const read = await client.request(
           "thread/read",
           { threadId: childThreadId, includeTurns: true },
           { timeoutMs: 60_000 },
         );
         expect((read.thread as unknown as JsonObject).parentThreadId).toBe(parentThreadId);
-        const turns = read.thread.turns ?? [];
-        expect(turns.at(-1)?.status).toBe("completed");
+        expect(read.thread.turns?.at(-1)?.status).toBe("completed");
 
-        const page = await client.request(
-          "thread/turns/list",
-          { threadId: childThreadId, limit: 1, sortDirection: "desc", itemsView: "full" },
-          { timeoutMs: 60_000 },
+        const freshTelemetry = createTelemetryRecorder();
+        const freshMonitor = new CodexNativeSubagentMonitor(
+          client as never,
+          freshTelemetry.runtime,
         );
-        const pageTurns = isJsonObject(page) && Array.isArray(page.data) ? page.data : [];
-        const latestTurn = isJsonObject(pageTurns[0]) ? pageTurns[0] : undefined;
-        expect(latestTurn?.status).toBe("completed");
-
-        // Fresh-monitor recovery: no streamed state, only a persisted task row.
-        const recoveryRunId = codexNativeSubagentRunId(childThreadId);
-        const recovery = createDeliveryRecorder([
-          {
-            taskId: recoveryRunId,
-            runtime: "subagent",
-            taskKind: "codex-native",
-            sourceId: recoveryRunId,
-            requesterSessionKey: "live:recovery",
-            ownerKey: "live:recovery",
-            scopeKind: "session",
-            agentId: "live",
-            runId: recoveryRunId,
-            label: "Codex subagent",
-            task: "live recovery probe",
-            status: "running",
-            deliveryStatus: "not_applicable",
-            notifyPolicy: "silent",
-            createdAt: Date.now(),
-          } as AgentHarnessTaskRecord,
-        ]);
-        const recoveryMonitor = new CodexNativeSubagentMonitor(client as never, recovery.runtime);
-        recoveryMonitor.registerParent({
+        freshMonitor.registerParent({
           parentThreadId,
-          requesterSessionKey: "live:recovery",
+          requesterSessionKey: "live:fresh-monitor",
           taskRuntimeScope: {
-            requesterSessionKey: "live:recovery",
+            requesterSessionKey: "live:fresh-monitor",
           } as AgentHarnessTaskRuntimeScope,
           agentId: "live",
         });
-        const recovered = await waitFor(
-          () => recovery.deliveries[0],
-          120_000,
-          "history-based completion recovery",
-        );
-        expect(recovered.childSessionId).toBe(childThreadId);
-        expect(recovered.status).toBe("succeeded");
-        expect(recovered.result).toMatch(/BANANA42/iu);
+        await delay(1_000);
+        expect(freshTelemetry.listCalls).toBe(0);
+        expect(freshTelemetry.finalized).toHaveLength(0);
+        expect(freshTelemetry.deliveryAttempts).toHaveLength(0);
       } finally {
         await client?.closeAndWait();
         await fs.rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });

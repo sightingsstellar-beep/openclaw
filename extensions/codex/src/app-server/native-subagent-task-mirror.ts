@@ -51,7 +51,7 @@ export class CodexNativeSubagentTaskMirror {
   markAuthoritativeCompletion(childThreadId: string): void {
     const runId = codexNativeSubagentRunId(childThreadId);
     // Run identity is per child thread, not per resumed turn. Once the monitor
-    // finalizes and delivers this task, later mirror events must not rewrite it.
+    // finalizes this telemetry row, later mirror events must not rewrite it.
     this.authoritativeRunIds.add(runId);
     this.terminalRunIds.add(runId);
   }
@@ -183,6 +183,7 @@ export class CodexNativeSubagentTaskMirror {
         error: "Codex app-server reported a system error for the native subagent thread.",
         progressSummary: "Codex native subagent hit a system error.",
         terminalSummary: "Codex native subagent failed.",
+        suppressDelivery: true,
       });
       return;
     }
@@ -370,27 +371,33 @@ export class CodexNativeSubagentTaskMirror {
       });
       return;
     }
+    if (this.expectedAuthoritativeRunIds.has(runId)) {
+      // Native Codex already routes the trusted completion into the parent.
+      // All child-side terminal signals remain telemetry until that envelope
+      // arrives; they never become an independent task-delivery source.
+      this.terminalRunIds.delete(runId);
+      this.runtime.recordTaskRunProgressByRunId({
+        runId,
+        lastEventAt: eventAt,
+        progressSummary:
+          trimOptional(message) ?? `Codex native subagent reported ${normalizedStatus}.`,
+      });
+      return;
+    }
     if (normalizedStatus === "completed") {
       this.terminalRunIds.add(runId);
       const summary = trimOptional(message) ?? "Codex native subagent completed.";
-      if (this.expectedAuthoritativeRunIds.has(runId)) {
-        this.runtime.recordTaskRunProgressByRunId({
-          runId,
-          lastEventAt: eventAt,
-          progressSummary: summary,
-        });
-      } else {
-        // Remote V1 has no trusted completion envelope or local transcript.
-        // Its collab-completed state is therefore the terminal fallback.
-        this.runtime.finalizeTaskRunByRunId({
-          runId,
-          status: "succeeded",
-          endedAt: eventAt,
-          lastEventAt: eventAt,
-          progressSummary: summary,
-          terminalSummary: summary,
-        });
-      }
+      // Remote V1 has no trusted completion envelope or local transcript.
+      // Its collab-completed state is therefore the terminal telemetry fallback.
+      this.runtime.finalizeTaskRunByRunId({
+        runId,
+        status: "succeeded",
+        endedAt: eventAt,
+        lastEventAt: eventAt,
+        progressSummary: summary,
+        terminalSummary: summary,
+        suppressDelivery: true,
+      });
       return;
     }
     if (normalizedStatus === "blocked") {
@@ -403,6 +410,7 @@ export class CodexNativeSubagentTaskMirror {
         progressSummary: trimOptional(message) ?? "Codex native subagent blocked.",
         terminalSummary: trimOptional(message) ?? "Codex native subagent blocked.",
         terminalOutcome: "blocked",
+        suppressDelivery: true,
       });
       return;
     }
@@ -418,6 +426,7 @@ export class CodexNativeSubagentTaskMirror {
       error: trimOptional(message) ?? `Codex native subagent status: ${normalizedStatus}`,
       progressSummary: trimOptional(message) ?? `Codex native subagent ${normalizedStatus}.`,
       terminalSummary: trimOptional(message) ?? "Codex native subagent did not complete.",
+      suppressDelivery: true,
     });
   }
 }

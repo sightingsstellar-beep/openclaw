@@ -1622,21 +1622,32 @@ async function verifyCodexNativeSubagentBridgeProbe(params: {
     ].join("\n"),
   });
   logCodexLiveStep("native-subagent-bridge-probe:initial-reply", { text });
+  const expectedParentReply = `${parentToken} ${childToken}`;
+  const parentReply =
+    text.trim() === expectedParentReply
+      ? text
+      : await waitForAssistantText({
+          client: params.client,
+          sessionKey: params.sessionKey,
+          contains: parentToken,
+          timeoutMs: CODEX_HARNESS_REQUEST_TIMEOUT_MS,
+        });
+  expect(parentReply.trim()).toBe(expectedParentReply);
   expect(
     events.some((event) => event.stream === "codex_app_server.lifecycle"),
     `expected Codex lifecycle events; events=${JSON.stringify(events)}`,
   ).toBe(true);
   let codexNativeTasks = listCodexNativeTasks();
-  let deliveredTask = findDeliveredCodexNativeTask(codexNativeTasks);
+  let nativeParentTask = findNativeParentCodexTask(codexNativeTasks);
   const deadline = Date.now() + CODEX_HARNESS_REQUEST_TIMEOUT_MS;
-  while (!deliveredTask && Date.now() < deadline) {
+  while (!nativeParentTask && Date.now() < deadline) {
     await delay(1_000);
     codexNativeTasks = listCodexNativeTasks();
-    deliveredTask = findDeliveredCodexNativeTask(codexNativeTasks);
+    nativeParentTask = findNativeParentCodexTask(codexNativeTasks);
   }
   expect(
-    deliveredTask,
-    `expected delivered Codex-native subagent task with child result; initialText=${JSON.stringify(
+    nativeParentTask,
+    `expected native-parent Codex subagent telemetry with child result; initialText=${JSON.stringify(
       text,
     )}; events=${JSON.stringify(events)}; tasks=${JSON.stringify(codexNativeTasks)}`,
   ).toBeDefined();
@@ -1647,11 +1658,12 @@ async function verifyCodexNativeSubagentBridgeProbe(params: {
     );
   }
 
-  function findDeliveredCodexNativeTask(tasks: ReturnType<typeof listCodexNativeTasks>) {
+  function findNativeParentCodexTask(tasks: ReturnType<typeof listCodexNativeTasks>) {
     return tasks.find(
       (entry) =>
         entry.status === "succeeded" &&
-        entry.deliveryStatus === "delivered" &&
+        entry.deliveryStatus === "not_applicable" &&
+        (entry.detail as { disposition?: string } | undefined)?.disposition === "native_parent" &&
         entry.terminalSummary?.includes(childToken),
     );
   }
