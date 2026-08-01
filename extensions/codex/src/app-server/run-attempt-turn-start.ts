@@ -50,7 +50,7 @@ export async function startCodexAttemptTurn(
     activateNativePreToolUseFailureFallback,
     releaseCurrentRoute,
     releaseSandboxExecEnvironment,
-    releaseSharedClientLeaseAndRetireOneShotClient,
+    releaseSharedClientLeaseAndMaybeRetireClient,
   } = resources;
   const { context, turnState, systemPromptReport } = prompt;
   const { runtime, historyState, hookContext, hookContextWindowFields, hookRunner } = context;
@@ -270,7 +270,7 @@ export async function startCodexAttemptTurn(
         cleanup: async () => trajectoryRecorder?.flush(),
       });
       params.abortSignal?.removeEventListener("abort", abortFromUpstream);
-      await releaseSharedClientLeaseAndRetireOneShotClient();
+      await releaseSharedClientLeaseAndMaybeRetireClient();
       if (usageLimitError) {
         await markCodexAuthProfileBlockedFromRateLimits({
           params,
@@ -310,7 +310,7 @@ export async function startCodexAttemptTurn(
   }
   if (!turn) {
     activateNativePreToolUseFailureFallback();
-    await releaseSharedClientLeaseAndRetireOneShotClient();
+    await releaseSharedClientLeaseAndMaybeRetireClient();
     throw new Error("codex app-server turn/start failed without an error");
   }
   turnIdRef.current = turn.turn.id;

@@ -985,11 +985,8 @@ async function completeStartedRun(
 }
 
 function installCleanupTrackingClient(turnStartError?: Error) {
-  const retireSpy = vi.spyOn(
-    sharedClientModule,
-    "clearSharedCodexAppServerClientIfCurrentAndUnclaimed",
-  );
-  retireSpy.mockReturnValue({ found: true, activeLeases: 0, pendingAcquires: 0, closed: true });
+  const retireSpy = vi.spyOn(sharedClientModule, "retireSharedCodexAppServerClientIfCurrent");
+  retireSpy.mockReturnValue({ activeLeases: 0, closed: true });
   const events: string[] = [];
   const closeAndWait = vi.fn(async () => {
     events.push("closeAndWait");
@@ -999,6 +996,14 @@ function installCleanupTrackingClient(turnStartError?: Error) {
     client?: unknown;
     notify?: (notification: CodexServerNotification) => Promise<void>;
   } = {};
+  const notificationHandlers = new Set<
+    (notification: CodexServerNotification) => Promise<void> | void
+  >();
+  state.notify = async (notification) => {
+    for (const handler of notificationHandlers) {
+      await handler(notification);
+    }
+  };
   setCodexAppServerClientFactoryForTest(async () => {
     const client = {
       ...mockClientRuntimeMethods(),
@@ -1016,8 +1021,8 @@ function installCleanupTrackingClient(turnStartError?: Error) {
         return {};
       }),
       addNotificationHandler: vi.fn((handler) => {
-        state.notify = handler;
-        return () => undefined;
+        notificationHandlers.add(handler);
+        return () => notificationHandlers.delete(handler);
       }),
       addRequestHandler: vi.fn(() => () => undefined),
       addCloseHandler: vi.fn(() => () => undefined),
@@ -2318,6 +2323,69 @@ describe("runCodexAppServerAttempt", () => {
     );
   });
 
+  it("keeps the parent subscription until a pending native child can finish", async () => {
+    const { closeAndWait, events, retireSpy, state } = installCleanupTrackingClient();
+    retireSpy.mockReturnValue({ activeLeases: 1, closed: false });
+    const params = createRunParams();
+    params.cleanupBundleMcpOnRunEnd = true;
+    const run = runCodexAppServerAttempt(params);
+    await vi.waitFor(() => expect(events).toContain("request:turn/start"), fastWait);
+    if (!state.notify) {
+      throw new Error("expected turn notification handler");
+    }
+    await state.notify({
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "child-thread",
+          parentThreadId: "thread-1",
+          source: {
+            subAgent: {
+              thread_spawn: {
+                parent_thread_id: "thread-1",
+                depth: 1,
+                agent_path: "child-thread",
+              },
+            },
+          },
+        },
+      },
+    });
+    await state.notify(turnCompleted({ id: "turn-1", status: "completed" }));
+    await run;
+
+    expect(events).not.toContain("request:thread/unsubscribe");
+    expect(retireSpy).toHaveBeenCalledWith(state.client);
+    expect(closeAndWait).not.toHaveBeenCalled();
+
+    const completion =
+      '<subagent_notification>{"agent_path":"child-thread","status":' +
+      '{"completed":"child result"}}</subagent_notification>';
+    await state.notify({
+      method: "rawResponseItem/completed",
+      params: {
+        threadId: "thread-1",
+        item: {
+          type: "message",
+          role: "assistant",
+          phase: "commentary",
+          content: [
+            {
+              type: "output_text",
+              text: JSON.stringify({
+                author: "child-thread",
+                recipient: "/root",
+                other_recipients: [],
+                content: completion,
+                trigger_turn: false,
+              }),
+            },
+          ],
+        },
+      },
+    });
+  });
+
   it("retires the shared Codex app-server client after one-shot turn start failures", async () => {
     const { closeAndWait, events, retireSpy, state } = installCleanupTrackingClient(
       new Error("turn start failed"),
@@ -2333,10 +2401,7 @@ describe("runCodexAppServerAttempt", () => {
     );
   });
   it("keeps the shared Codex app-server client warm without one-shot cleanup", async () => {
-    const retireSpy = vi.spyOn(
-      sharedClientModule,
-      "clearSharedCodexAppServerClientIfCurrentAndUnclaimed",
-    );
+    const retireSpy = vi.spyOn(sharedClientModule, "retireSharedCodexAppServerClientIfCurrent");
     const closeAndWait = vi.fn(async () => true);
     let notify: ((notification: CodexServerNotification) => Promise<void>) | undefined;
     const request = vi.fn(async (method: string) => {

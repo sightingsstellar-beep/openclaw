@@ -22,8 +22,8 @@ import type { CodexAttemptPrompt } from "./run-attempt-prompt.js";
 import { releaseCodexSandboxExecServerEnvironment } from "./sandbox-exec-server.js";
 import type { CodexAppServerThreadBinding } from "./session-binding.js";
 import {
-  clearSharedCodexAppServerClientIfCurrentAndUnclaimed,
-  retainSharedCodexAppServerClientIfCurrent,
+  retainLiveSharedCodexAppServerClient,
+  retireSharedCodexAppServerClientIfCurrent,
 } from "./shared-client.js";
 import type { CodexAppServerThreadLifecycleBinding } from "./thread-lifecycle.js";
 import { createCodexTrajectoryRecorder, type CodexHostTrajectoryRecorder } from "./trajectory.js";
@@ -75,7 +75,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
       | CodexNativePreToolUseFailure["disposition"]
       | undefined,
     releaseSharedClientLease: undefined as (() => void) | undefined,
-    sharedCodexClientRetiredForOneShotCleanup: false,
+    sharedCodexClientRetiredForCleanup: false,
     sandboxExecEnvironmentAcquired: false,
     codexEnvironmentSelection: undefined as CodexTurnEnvironmentParams[] | undefined,
     codexExecutionCwd: effectiveCwd,
@@ -124,31 +124,32 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     state.releaseSharedClientLease = undefined;
     release();
   };
-  const retireSharedCodexClientForOneShotCleanup = async () => {
+  const retireSharedCodexClientForCleanup = async (forceRetire = false) => {
     if (
-      params.cleanupBundleMcpOnRunEnd !== true ||
-      state.sharedCodexClientRetiredForOneShotCleanup
+      (!forceRetire && params.cleanupBundleMcpOnRunEnd !== true) ||
+      state.sharedCodexClientRetiredForCleanup
     ) {
       return;
     }
-    state.sharedCodexClientRetiredForOneShotCleanup = true;
-    const retired = clearSharedCodexAppServerClientIfCurrentAndUnclaimed(state.client);
-    embeddedAgentLog.info("codex app-server one-shot cleanup checked shared client retirement", {
+    state.sharedCodexClientRetiredForCleanup = true;
+    const retired = retireSharedCodexAppServerClientIfCurrent(state.client);
+    embeddedAgentLog.info("codex app-server cleanup retired shared client", {
       runId: params.runId,
       sessionId: params.sessionId,
       sessionKey: params.sessionKey,
-      activeLeases: retired.activeLeases,
-      pendingAcquires: retired.pendingAcquires,
-      closed: retired.closed,
-      matchedSharedClient: retired.found,
+      activeLeases: retired?.activeLeases ?? 0,
+      closed: retired?.closed ?? false,
+      matchedSharedClient: retired !== undefined,
     });
-    if (retired.closed) {
+    if (retired?.closed) {
       await state.client.closeAndWait({ exitTimeoutMs: 2_000, forceKillDelayMs: 250 });
     }
   };
-  const releaseSharedClientLeaseAndRetireOneShotClient = async () => {
+  const releaseSharedClientLeaseAndMaybeRetireClient = async (
+    retirement: { forceRetire?: boolean } = {},
+  ) => {
     releaseSharedClientLeaseOnce();
-    await retireSharedCodexClientForOneShotCleanup();
+    await retireSharedCodexClientForCleanup(retirement.forceRetire === true);
   };
   const releaseSandboxExecEnvironment = async () => {
     if (state.sandboxExecEnvironmentAcquired) {
@@ -168,7 +169,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
       requesterSessionKey: params.sessionKey,
       taskRuntimeScope: params.agentHarnessTaskRuntimeScope,
       agentId: sessionAgentId,
-      retainClient: () => retainSharedCodexAppServerClientIfCurrent(state.client),
+      retainClient: () => retainLiveSharedCodexAppServerClient(state.client),
     });
   };
   const releaseCurrentRoute = () => {
@@ -254,7 +255,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     },
     activateNativePreToolUseFailureFallback,
     releaseSharedClientLeaseOnce,
-    releaseSharedClientLeaseAndRetireOneShotClient,
+    releaseSharedClientLeaseAndMaybeRetireClient,
     releaseSandboxExecEnvironment,
     registerNativeSubagentMonitor,
     releaseCurrentRoute,
