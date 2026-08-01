@@ -11,6 +11,7 @@ import type { CodexAppServerStartOptions } from "./config.js";
 import type { CodexAppServerTransport } from "./transport.js";
 
 const UNSAFE_ENVIRONMENT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+const PARENT_ONLY_ENVIRONMENT_KEYS = ["MC_V3_API_TOKEN", "MC_V3_API_TOKEN_FILE"] as const;
 const QA_PARENT_PID_ENV = "OPENCLAW_QA_PARENT_PID";
 
 type CodexAppServerSpawnRuntime = {
@@ -58,7 +59,10 @@ export function resolveCodexAppServerSpawnEnv(
   const env = Object.create(null) as NodeJS.ProcessEnv;
   copySafeEnvironmentEntries(env, baseEnv);
   copySafeEnvironmentEntries(env, options.env ?? {});
-  const keysToClear = normalizedEnvironmentKeys(options.clearEnv ?? []);
+  const keysToClear = normalizedEnvironmentKeys([
+    ...PARENT_ONLY_ENVIRONMENT_KEYS,
+    ...(options.clearEnv ?? []),
+  ]);
   if (platform === "win32") {
     const lowerCaseKeysToClear = new Set(keysToClear.map((key) => key.toLowerCase()));
     for (const candidate of Object.keys(env)) {
