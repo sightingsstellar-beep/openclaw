@@ -97,7 +97,7 @@ async function waitFor<T>(probe: () => T | undefined, timeoutMs: number, what: s
 }
 
 describeLive("codex native subagent monitor live", () => {
-  it("observes a late native result without synthesizing a recovery turn", async () => {
+  it("observes a parent-consumed native result without synthesizing a recovery turn", async () => {
     const apiKey = process.env.OPENAI_API_KEY?.trim();
     if (!apiKey) {
       throw new Error("OPENAI_API_KEY is required for this live test");
@@ -178,7 +178,7 @@ describeLive("codex native subagent monitor live", () => {
             input: [
               {
                 type: "text",
-                text: "Spawn exactly one subagent with this exact task: 'First run the shell command sleep 20 and wait for it to finish. Then reply with exactly the word BANANA42.' Do not wait for the subagent to finish. Reply DONE immediately after spawning it.",
+                text: "Spawn exactly one subagent with this exact task: 'First run the shell command sleep 20 and wait for it to finish. Then reply with exactly the word BANANA42.' Wait for the subagent to finish. Then reply with exactly the words DONE BANANA42.",
               },
             ],
           },
@@ -189,6 +189,39 @@ describeLive("codex native subagent monitor live", () => {
           () => (parentTurnCompletions === 1 ? true : undefined),
           300_000,
           "initial parent turn completion",
+        );
+        const childListDeadline = Date.now() + 30_000;
+        let childThreads: Array<{ id: string; source?: unknown; status?: unknown }> = [];
+        while (Date.now() < childListDeadline) {
+          const listed = await client.request(
+            "thread/list",
+            { parentThreadId, limit: 20 },
+            { timeoutMs: 60_000 },
+          );
+          childThreads = listed.data;
+          if (childThreads.length > 0) {
+            break;
+          }
+          await delay(500);
+        }
+        if (childThreads.length === 0) {
+          const parentRead = await client.request(
+            "thread/read",
+            { threadId: parentThreadId, includeTurns: true },
+            { timeoutMs: 60_000 },
+          );
+          throw new Error(
+            `parent completed without spawning a child thread: ${JSON.stringify(parentRead.thread.turns?.at(-1))}`,
+          );
+        }
+        console.error(
+          `[native-subagent-live] observed child threads ${JSON.stringify(
+            childThreads.map((thread) => ({
+              id: thread.id,
+              source: thread.source,
+              status: thread.status,
+            })),
+          )}`,
         );
         parentRegistration.unregister();
         expect(telemetry.deliveryAttempts).toHaveLength(0);

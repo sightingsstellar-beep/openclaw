@@ -621,6 +621,12 @@ class Monitor {
     if (!state) {
       return;
     }
+    for (const completion of readParentWaitCompletions(notification, state.parentThreadId)) {
+      const childState = this.childStates.get(completion.childThreadId);
+      if (childState?.parentThreadId === state.parentThreadId) {
+        this.settleNativeParentCompletion(state, childState, completion);
+      }
+    }
     for (const nativeCompletion of nativeSubagentNotifications.fromNotification(notification)) {
       const childThreadId = this.childThreadIdsByAgentPath.get(
         buildParentAgentPathKey(state.parentThreadId, nativeCompletion.agentPath),
@@ -1147,6 +1153,73 @@ function readTurnErrorMessage(turn: JsonObject): string | undefined {
       isJsonObject(error?.codexErrorInfo) ? readString(error.codexErrorInfo, "message") : undefined,
     )
   );
+}
+
+function readParentWaitCompletions(
+  notification: CodexServerNotification,
+  parentThreadId: string,
+): CodexNativeSubagentCompletion[] {
+  if (notification.method !== "item/completed") {
+    return [];
+  }
+  const params = isJsonObject(notification.params) ? notification.params : undefined;
+  const item = isJsonObject(params?.item) ? params.item : undefined;
+  const senderThreadId = readString(item, "senderThreadId")?.trim();
+  if (
+    readString(item, "type") !== "collabAgentToolCall" ||
+    normalizeIdentifier(readString(item, "tool")) !== "wait" ||
+    normalizeIdentifier(readString(item, "status")) !== "completed" ||
+    (senderThreadId !== undefined && senderThreadId !== parentThreadId) ||
+    !isJsonObject(item?.agentsStates)
+  ) {
+    return [];
+  }
+  const completions: CodexNativeSubagentCompletion[] = [];
+  for (const [rawThreadId, rawState] of Object.entries(item.agentsStates)) {
+    if (!isJsonObject(rawState)) {
+      continue;
+    }
+    const childThreadId = rawThreadId.trim();
+    const statusLabel = readString(rawState, "status")?.trim();
+    const status = mapParentWaitStatus(statusLabel);
+    if (!childThreadId || !status || !statusLabel) {
+      continue;
+    }
+    const result =
+      normalizeOptionalString(readString(rawState, "message")) ??
+      (status === "succeeded"
+        ? "Codex native subagent completed."
+        : `Codex native subagent status: ${statusLabel}`);
+    completions.push({ childThreadId, status, statusLabel, result });
+  }
+  return completions;
+}
+
+function mapParentWaitStatus(
+  value: string | undefined,
+): CodexNativeSubagentCompletion["status"] | undefined {
+  const status = normalizeIdentifier(value);
+  if (status === "completed" || status === "succeeded" || status === "success") {
+    return "succeeded";
+  }
+  if (
+    status === "interrupted" ||
+    status === "cancelled" ||
+    status === "canceled" ||
+    status === "shutdown"
+  ) {
+    return "cancelled";
+  }
+  if (
+    status === "failed" ||
+    status === "error" ||
+    status === "errored" ||
+    status === "systemerror" ||
+    status === "notfound"
+  ) {
+    return "failed";
+  }
+  return undefined;
 }
 
 function systemErrorFallbackCompletion(childThreadId: string): RecoveredCompletion {

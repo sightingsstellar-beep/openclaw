@@ -4,7 +4,7 @@ import type {
 } from "openclaw/plugin-sdk/agent-harness-task-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { codexNativeSubagentMonitorRuntime } from "./native-subagent-monitor.js";
-import type { CodexServerNotification } from "./protocol.js";
+import { isJsonObject, type CodexServerNotification } from "./protocol.js";
 
 const CodexNativeSubagentMonitor = codexNativeSubagentMonitorRuntime.Monitor;
 type MonitorInstance = InstanceType<typeof CodexNativeSubagentMonitor>;
@@ -206,6 +206,25 @@ function nativeCompletion(
   };
 }
 
+function parentWaitCompletion(
+  agentsStates: Record<string, { status: string; message?: string | null }>,
+  options: { senderThreadId?: string; status?: string; tool?: string } = {},
+): CodexServerNotification {
+  return {
+    method: "item/completed",
+    params: {
+      threadId: "parent-thread",
+      item: {
+        type: "collabAgentToolCall",
+        tool: options.tool ?? "wait",
+        status: options.status ?? "completed",
+        ...(options.senderThreadId === undefined ? {} : { senderThreadId: options.senderThreadId }),
+        agentsStates,
+      },
+    },
+  };
+}
+
 function expectMonitorSilent(runtime: ReturnType<typeof createRuntime>) {
   expect(runtime.deliverAgentHarnessTaskCompletion).not.toHaveBeenCalled();
   expect(runtime.taskRuntime.setDetachedTaskDeliveryStatusByRunId).not.toHaveBeenCalled();
@@ -252,6 +271,88 @@ describe("Codex native subagent monitor Path A", () => {
       suppressDelivery: true,
     });
     expect(registration.hasPendingChildren()).toBe(false);
+    expectMonitorSilent(runtime);
+  });
+
+  it("treats a completed parent wait item as the consumed-result boundary", async () => {
+    const client = createClient();
+    const runtime = createRuntime();
+    const monitor = createMonitor(client, runtime);
+    const registration = registerParent(monitor);
+    await notifyChildStarted(client, "child-a");
+    await notifyChildStarted(client, "child-b");
+
+    await client.notify(
+      parentWaitCompletion({
+        "child-a": { status: "completed", message: "A" },
+        "child-b": { status: "errored", message: "B failed" },
+      }),
+    );
+
+    expect(runtime.taskRuntime.finalizeTaskRunByRunId).toHaveBeenCalledTimes(2);
+    expect(runtime.taskRuntime.finalizeTaskRunByRunId).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        runId: "codex-thread:child-a",
+        status: "succeeded",
+        terminalSummary: "A",
+        suppressDelivery: true,
+      }),
+    );
+    expect(runtime.taskRuntime.finalizeTaskRunByRunId).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        runId: "codex-thread:child-b",
+        status: "failed",
+        error: "B failed",
+        terminalSummary: "B failed",
+        suppressDelivery: true,
+      }),
+    );
+    expect(registration.hasPendingChildren()).toBe(false);
+    expectMonitorSilent(runtime);
+  });
+
+  it("rejects non-wait, nonterminal, wrong-parent, and unknown-child wait states", async () => {
+    const client = createClient();
+    const runtime = createRuntime();
+    const monitor = createMonitor(client, runtime);
+    registerParent(monitor);
+    await notifyChildStarted(client, "known-child");
+
+    await client.notify(
+      parentWaitCompletion(
+        { "known-child": { status: "completed", message: "spoof" } },
+        { tool: "spawnAgent" },
+      ),
+    );
+    await client.notify(
+      parentWaitCompletion(
+        { "known-child": { status: "completed", message: "spoof" } },
+        { status: "inProgress" },
+      ),
+    );
+    await client.notify(
+      parentWaitCompletion(
+        { "known-child": { status: "completed", message: "spoof" } },
+        { senderThreadId: "other-parent" },
+      ),
+    );
+    await client.notify(
+      parentWaitCompletion({ "unknown-child": { status: "completed", message: "spoof" } }),
+    );
+    await client.notify(
+      parentWaitCompletion({ "known-child": { status: "running", message: "still running" } }),
+    );
+
+    expect(
+      vi
+        .mocked(runtime.taskRuntime.finalizeTaskRunByRunId)
+        .mock.calls.filter(
+          ([params]) =>
+            isJsonObject(params.detail) && params.detail.disposition === "native_parent",
+        ),
+    ).toHaveLength(0);
     expectMonitorSilent(runtime);
   });
 
